@@ -6,11 +6,12 @@ goreleaser = "2"
 hadolint = "latest"
 actionlint = "latest"
 
-[env]
-CGO_ENABLED = "0"
-
 [tasks.build]
 description = "Build the exporter binary"
+# CGO is off for the binary so the container image can be distroless/static. It is
+# deliberately not set globally: the race detector needs cgo, and disabling it here
+# would make `mise run test` fail on Linux while quietly passing on macOS.
+env = { CGO_ENABLED = "0" }
 run = "go build -trimpath -o bin/espressif-exporter ./cmd/espressif-exporter"
 
 [tasks.test]
