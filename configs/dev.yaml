@@ -1,0 +1,39 @@
+# Development configuration: no Docker, no D-Bus, no Avahi.
+#
+# The zeroconf backend finds nothing on macOS, because mDNSResponder already holds port
+# 5353. On macOS, list real devices under discovery.static instead and find their
+# addresses with:
+#     dns-sd -B _shelly._tcp local
+#     dns-sd -G v4 <hostname>.local
+log:
+  level: debug
+  format: text
+
+server:
+  listen: ":9826"
+  pprof: true
+
+discovery:
+  sources: [zeroconf, static]
+  service_types:
+    - _esphomelib._tcp
+    - _shelly._tcp
+    - _http._tcp
+  ipv6: false
+  # Narrow this to your own subnet to stop the exporter preferring an address on a VPN
+  # or secondary interface that it cannot actually route to.
+  # allow_cidrs: ["192.168.1.0/24"]
+
+  static: []
+  # - {id: boiler, kind: shelly, address: 192.168.1.51, port: 80}
+  # - {id: bedroom-sensor, kind: esphome, address: 192.168.1.10, port: 6053}
+
+esphome:
+  # A single shared Noise PSK for the whole fleet.
+  # encryption_key: "base64-32-bytes=="
+  require_encryption: false
+
+shelly:
+  auth:
+    username: admin
+    # password: "..."

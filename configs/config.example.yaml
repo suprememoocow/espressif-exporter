@@ -1,0 +1,89 @@
+# Production configuration for TrueNAS SCALE, running in a bridged container.
+#
+# Discovery goes through the host's avahi-daemon over the system D-Bus socket, because a
+# bridged container cannot send or receive multicast and so cannot do mDNS itself.
+# See deploy/docker-compose.yml for the bind mount that makes this work.
+
+log:
+  level: info
+  format: json
+
+server:
+  listen: ":9826"
+  read_header_timeout: 5s
+  shutdown_timeout: 10s
+  max_requests: 64
+
+discovery:
+  # Always configure static alongside avahi, so a total Avahi outage degrades coverage
+  # rather than eliminating it. Put anything you alert on in the static list.
+  sources: [avahi, static]
+  service_types:
+    - _esphomelib._tcp
+    - _shelly._tcp
+    - _http._tcp   # Shelly Gen1 advertise only here
+
+  # Off by default: a Docker bridge network usually has no IPv6 at all, so preferring an
+  # IPv6 address would make a device permanently unscrapeable.
+  ipv6: false
+  allow_cidrs: ["192.168.1.0/24"]
+  deny_cidrs: ["169.254.0.0/16", "fe80::/10"]
+  stale_after: 24h
+
+  avahi:
+    # Empty means $DBUS_SYSTEM_BUS_ADDRESS, then unix:path=/run/dbus/system_bus_socket.
+    dbus_address: ""
+    required: true
+    startup_timeout: 30s
+    resolve_timeout: 5s
+    resolve_concurrency: 8
+    health_check_interval: 30s
+    rebrowse_interval: 30m
+
+  static:
+    - {id: boiler, kind: shelly, address: 192.168.1.51, port: 80}
+
+registry:
+  refresh_interval: 5m
+  endpoint_ttl: 10m
+  # Generous on purpose: on a home LAN a twenty-minute absence is a wifi problem, and an
+  # alertable probe_success 0 beats a series that silently disappears.
+  device_ttl: 30m
+  remove_grace: 5m
+
+probe:
+  default_timeout: 10s
+  timeout_offset: 500ms
+  max_concurrent: 32
+  cache_ttl: 2s
+  backoff:
+    failures_before_open: 3
+    initial: 15s
+    max: 5m
+    # Longer, because retrying a wrong password will never succeed and some Shelly
+    # firmwares rate-limit repeated auth failures.
+    auth_initial: 1m
+    auth_max: 15m
+
+shelly:
+  auth:
+    username: admin
+    password_file: /run/secrets/shelly_password
+    # Evaluated top to bottom; first match wins. Unset fields inherit from the global.
+    overrides:
+      - match: {hostname: "shelly1-*"}
+        password_file: /run/secrets/shelly_legacy_password
+  generic_fallback: true
+
+esphome:
+  encryption_key_file: /run/secrets/esphome_psk
+  require_encryption: false
+  port: 6053
+  # Legacy plaintext API password, for nodes on firmware older than ESPHome 2026.1.0
+  # where it was removed. Such a node accepts the connection, answers DeviceInfo, then
+  # closes it. Prefer an encryption key where the firmware supports one.
+  # password_file: /run/secrets/esphome_password
+
+metrics:
+  percent_as_ratio: true
+  text_sensors: true

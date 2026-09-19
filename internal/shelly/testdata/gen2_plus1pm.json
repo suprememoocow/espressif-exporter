@@ -1,0 +1,34 @@
+{
+  "ble": {},
+  "cloud": {"connected": false},
+  "input:0": {"id": 0, "state": false},
+  "mqtt": {"connected": true},
+  "switch:0": {
+    "id": 0,
+    "source": "HTTP_in",
+    "output": true,
+    "apower": 18.4,
+    "voltage": 241.3,
+    "freq": 50.1,
+    "current": 0.082,
+    "pf": 0.93,
+    "aenergy": {"total": 13060.0, "by_minute": [0.0], "minute_ts": 1758297300},
+    "ret_aenergy": {"total": 0.0, "by_minute": [0.0], "minute_ts": 1758297300},
+    "temperature": {"tC": 44.6, "tF": 112.3}
+  },
+  "sys": {
+    "mac": "A8032AB1C2D3",
+    "restart_required": false,
+    "time": "10:35",
+    "unixtime": 1758297341,
+    "uptime": 918442,
+    "ram_size": 260248,
+    "ram_free": 96016,
+    "fs_size": 458752,
+    "fs_free": 135168,
+    "cfg_rev": 21,
+    "available_updates": {"stable": {"version": "1.5.1"}}
+  },
+  "wifi": {"sta_ip": "192.168.1.57", "status": "got ip", "ssid": "house", "rssi": -61},
+  "ws": {"connected": false}
+}

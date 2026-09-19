@@ -1,0 +1,22 @@
+# Host-networking fallback, for a Linux host with no avahi-daemon.
+#
+# Use this if the D-Bus approach proves unworkable. The native Go mDNS browser binds
+# port 5353 itself, so this will NOT work anywhere avahi or mDNSResponder already holds
+# that port — which includes TrueNAS SCALE and macOS.
+
+services:
+  espressif-exporter:
+    image: ghcr.io/suprememoocow/espressif-exporter:latest
+    container_name: espressif-exporter
+    restart: unless-stopped
+    stop_grace_period: 20s
+    network_mode: host
+
+    environment:
+      EE_LOG__FORMAT: "json"
+      EE_DISCOVERY__SOURCES: "zeroconf,static"
+
+    volumes:
+      - ./config.yaml:/etc/espressif-exporter/config.yaml:ro
+
+    command: ["--config=/etc/espressif-exporter/config.yaml"]

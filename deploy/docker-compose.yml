@@ -1,0 +1,48 @@
+# TrueNAS SCALE deployment.
+#
+# Discovery goes through the host's avahi-daemon over the system D-Bus socket, which is
+# what lets this run on the default bridge network. Two things make that necessary:
+# a bridged container cannot send or receive multicast, and on TrueNAS the host's
+# avahi-daemon holds port 5353 on every interface and cannot be disabled. Borrowing the
+# daemon sidesteps both, and unicast HTTP and TCP to the devices work from the bridge.
+#
+# Before deploying, verify on the host:
+#   ls -l /run/dbus/system_bus_socket
+#   systemctl is-active avahi-daemon
+#   busctl --system list | grep -i avahi
+#   avahi-browse -rt _shelly._tcp _esphomelib._tcp
+
+services:
+  espressif-exporter:
+    image: ghcr.io/suprememoocow/espressif-exporter:latest
+    container_name: espressif-exporter
+    restart: unless-stopped
+    stop_grace_period: 20s
+
+    user: "65532:65532"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+
+    environment:
+      # Stated explicitly because distroless has no /var/run -> /run symlink, while
+      # godbus's compiled-in default is /var/run/dbus/system_bus_socket.
+      DBUS_SYSTEM_BUS_ADDRESS: "unix:path=/run/dbus/system_bus_socket"
+      EE_LOG__FORMAT: "json"
+
+    volumes:
+      # The mount that makes the whole thing work. :ro is safe on a unix socket — Linux
+      # exempts sockets from the read-only-mount write check — and it stops the
+      # container replacing the socket inode.
+      - /run/dbus/system_bus_socket:/run/dbus/system_bus_socket:ro
+      - ./config.yaml:/etc/espressif-exporter/config.yaml:ro
+      # Uncomment if you use *_file secrets:
+      # - ./secrets:/run/secrets:ro
+
+    command: ["--config=/etc/espressif-exporter/config.yaml"]
+
+    ports:
+      - "9826:9826"
+
+    # Deliberately NOT network_mode: host. The default bridge is correct, and is the
+    # whole reason the D-Bus mount above exists.

@@ -1,0 +1,19 @@
+{
+  "em:0": {
+    "id": 0,
+    "a_current": 1.2, "a_voltage": 238.1, "a_act_power": 280.5, "a_aprt_power": 290.0, "a_pf": 0.97, "a_freq": 50.0,
+    "b_current": 0.8, "b_voltage": 239.4, "b_act_power": 190.2, "b_aprt_power": 195.0, "b_pf": 0.98, "b_freq": 50.0,
+    "c_current": null, "c_voltage": null, "c_act_power": null, "c_aprt_power": null, "c_pf": null,
+    "n_current": 0.4,
+    "total_current": 2.0, "total_act_power": 470.7, "total_aprt_power": 485.0,
+    "errors": ["phase_sequence"]
+  },
+  "emdata:0": {
+    "id": 0,
+    "a_total_act_energy": 120000.0, "a_total_act_ret_energy": 500.0,
+    "b_total_act_energy": 80000.0, "b_total_act_ret_energy": 0.0,
+    "total_act_energy": 200000.0, "total_act_ret_energy": 500.0
+  },
+  "newfangled:0": {"widgets": 42, "sub": {"depth": 7}, "ts": 1758297341},
+  "sys": {"uptime": 100, "available_updates": {}}
+}

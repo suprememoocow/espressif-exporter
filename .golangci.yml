@@ -1,0 +1,34 @@
+version: "2"
+
+linters:
+  default: standard
+  enable:
+    - bodyclose      # a leaked response body exhausts the connection pool we tuned
+    - contextcheck   # every device call must carry the probe deadline
+    - noctx          # an HTTP request without a context cannot be cancelled
+    - errorlint
+    - gocritic
+    - gosec
+    - misspell
+    - nolintlint
+    - revive
+    - unconvert
+    - wastedassign
+
+  settings:
+    revive:
+      rules:
+        - name: exported
+          disabled: true   # package comments cover this; per-symbol docs are enforced by review
+    gosec:
+      excludes:
+        - G104           # duplicated by errcheck
+
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters: [gosec, noctx, bodyclose]
+
+formatters:
+  enable:
+    - gofmt

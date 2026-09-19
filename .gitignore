@@ -1,0 +1,4 @@
+/bin/
+/cover.out
+/deploy/config.yaml
+/deploy/secrets/

@@ -1,0 +1,38 @@
+[tools]
+go = "1.27"
+golangci-lint = "2"
+gotestsum = "latest"
+goreleaser = "2"
+hadolint = "latest"
+actionlint = "latest"
+
+[env]
+CGO_ENABLED = "0"
+
+[tasks.build]
+description = "Build the exporter binary"
+run = "go build -trimpath -o bin/espressif-exporter ./cmd/espressif-exporter"
+
+[tasks.test]
+description = "Run tests with race detector"
+run = "gotestsum -- -race -coverprofile=cover.out ./..."
+
+[tasks.lint]
+description = "Lint Go, workflows and Dockerfile"
+run = [
+  "golangci-lint run",
+  "test ! -f Dockerfile || hadolint Dockerfile",
+  "test ! -d .github/workflows || actionlint",
+]
+
+[tasks.fmt]
+description = "Format and tidy"
+run = ["go fmt ./...", "go mod tidy"]
+
+[tasks.dev]
+description = "Run against the local network using zeroconf discovery"
+run = "go run ./cmd/espressif-exporter --config configs/dev.yaml"
+
+[tasks.docker]
+description = "Build the container image locally"
+run = "docker buildx build --load -t espressif-exporter:dev ."
