@@ -379,6 +379,20 @@ DHCP reassigned the address to another device. The exporter emits no metrics rat
 attributing one device's readings to another. Discovery corrects this on the next
 resolve.
 
+### An ESPHome node connects, then fails with `not_connected`
+
+The node requires an API password. ESPHome before 2026.1.0 answers the device-information
+request without authentication, then closes the connection on the next request. A node
+with encryption enabled refuses plaintext outright instead, so this pattern identifies a
+password specifically. The log names the node and the fix.
+
+Set `esphome.password`, or migrate the node to an encryption key. ESPHome removed
+password authentication in 2026.1.0.
+
+A log line reading `node did not accept the encrypted handshake; using plaintext` is
+expected and harmless. The mDNS record does not reliably say whether a node is
+encrypted, so the exporter tries the handshake and falls back once.
+
 ### A probe returns `auth`
 
 The exporter reached the device, and the device rejected the credential. Compare this
@@ -421,14 +435,16 @@ mise run dev      # runs against configs/dev.yaml
 mise run docker
 ```
 
-The `zeroconf` backend finds nothing on macOS, because `mDNSResponder` holds port 5353.
-For local development, list real devices under `discovery.static` and find their
-addresses with `dns-sd`:
+The `zeroconf` backend finds nothing on macOS, because `mDNSResponder` owns port 5353
+exclusively. The exporter detects this at startup and logs the reason. Generate a static
+device list from Bonjour instead:
 
 ```bash
-dns-sd -B _shelly._tcp local
-dns-sd -G v4 <hostname>.local
+scripts/macos-static-config.sh 10 > devices.yaml
 ```
+
+Append the result to your config and set `discovery.sources: [static]`. Regenerate it
+after a DHCP change.
 
 ### Layout
 

@@ -8,6 +8,7 @@ package zeroconf
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/netip"
 	"sync"
@@ -55,6 +56,17 @@ func (d *Discoverer) Health() discovery.Health {
 
 // Run browses until ctx is cancelled.
 func (d *Discoverer) Run(ctx context.Context, out chan<- discovery.Event) error {
+	// Say so immediately when this backend cannot possibly work here. Without this the
+	// exporter reports zero devices indefinitely and gives no reason, which is the
+	// hardest kind of failure to diagnose.
+	var inUse *portInUseError
+	if err := checkPortOwnership(); errors.As(err, &inUse) {
+		d.log.Error("another mDNS daemon owns UDP port 5353, so this backend will "+
+			"receive nothing and discover no devices",
+			"error", inUse, "fix", inUse.Advice())
+		d.setUp(false, "UDP 5353 is owned by another mDNS daemon")
+	}
+
 	g, ctx := errgroup.WithContext(ctx)
 	for _, service := range d.serviceTypes {
 		g.Go(func() error {
@@ -63,7 +75,6 @@ func (d *Discoverer) Run(ctx context.Context, out chan<- discovery.Event) error 
 		})
 	}
 
-	d.setUp(true, "")
 	defer d.setUp(false, "stopped")
 	return g.Wait()
 }
@@ -145,6 +156,8 @@ func (d *Discoverer) emit(
 		}
 	}
 
+	// Receiving anything is the only proof this backend works, so health is asserted
+	// here rather than on a successful browse call.
 	d.mu.Lock()
 	d.health.LastEventAt = now
 	d.health.Up = true

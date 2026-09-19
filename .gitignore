@@ -2,3 +2,4 @@
 /cover.out
 /deploy/config.yaml
 /deploy/secrets/
+configs/home.yaml

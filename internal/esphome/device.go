@@ -128,11 +128,13 @@ func (d *device) session(ctx context.Context) (cleanDisconnect bool, err error) 
 	if err := d.enumerate(conn); err != nil {
 		d.cache.recordFailure("list_entities", err.Error())
 		if d.cfg.Password.Reveal() == "" {
-			// ESPHome before 2026.1.0 answers Hello and DeviceInfo unauthenticated, then
-			// drops the connection on the first real request. Without naming the likely
-			// cause this looks like a flaky network rather than a missing credential.
-			d.log.Warn("device accepted the connection then closed it during ListEntities; "+
-				"this node most likely has a legacy API password set",
+			// ESPHome before 2026.1.0 answers Hello and DeviceInfo without
+			// authentication, then closes the connection on the first real request.
+			// A node with encryption enabled refuses plaintext outright instead, so
+			// reaching this point over plaintext identifies a password specifically.
+			d.log.Warn("node answered DeviceInfo over plaintext then closed the "+
+				"connection during ListEntities, which means it requires an API password",
+				"node_name", info.GetName(),
 				"esphome_version", info.GetEsphomeVersion(),
 				"hint", "set esphome.password, or migrate the node to an encryption key")
 		}
@@ -283,7 +285,11 @@ func (d *device) connect(ctx context.Context) (Conn, transportMode, error) {
 
 		lastErr = err
 		if mode == transportNoise && !d.cfg.RequireEncryption {
-			d.log.Warn("encrypted handshake failed; falling back to plaintext for this process",
+			// Expected, not alarming: a node with no encryption configured resets the
+			// connection when it receives a Noise preamble. Since the mDNS record does
+			// not reliably say whether a node is encrypted, trying and falling back is
+			// the only way to find out.
+			d.log.Info("node did not accept the encrypted handshake; using plaintext",
 				"error", err)
 		}
 	}
