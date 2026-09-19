@@ -75,10 +75,19 @@ Check the host first:
 
 ```bash
 ls -l /run/dbus/system_bus_socket
-systemctl is-active avahi-daemon
+systemctl is-active dbus avahi-daemon
 busctl --system list | grep -i avahi
-avahi-browse -rt _shelly._tcp _esphomelib._tcp
+getent passwd 568
+avahi-browse -rt _shelly._tcp
+avahi-browse -rt _esphomelib._tcp
 ```
+
+`avahi-browse` takes one service type per invocation. Two types in one command fail with
+`Too many arguments`.
+
+`getent passwd 568` must print a line. `dbus-daemon` looks the container's uid up in the
+host's passwd database before it accepts the connection, so the uid in
+`deploy/docker-compose.yml` has to exist on the host. 568 is TrueNAS SCALE's `apps` user.
 
 Copy `configs/config.example.yaml` to `deploy/config.yaml` and edit it. Then start the
 exporter:
@@ -346,10 +355,11 @@ counts each unknown type, which tells you when a component needs a curated extra
 
 ### The exporter finds no devices
 
-Check that Avahi works on the host:
+Check that Avahi works on the host, one service type per invocation:
 
 ```bash
-avahi-browse -rt _shelly._tcp _esphomelib._tcp
+avahi-browse -rt _shelly._tcp
+avahi-browse -rt _esphomelib._tcp
 ```
 
 Then check what the exporter sees:
@@ -359,9 +369,51 @@ curl -s localhost:9826/metrics | grep espressif_exporter_avahi_up
 curl -s localhost:9826/debug/devices | jq 'length'
 ```
 
-`espressif_exporter_avahi_up 0` means the exporter cannot reach `avahi-daemon`. Confirm
-that the compose file mounts `/run/dbus/system_bus_socket` and sets
-`DBUS_SYSTEM_BUS_ADDRESS`.
+`espressif_exporter_avahi_up 0` means the exporter cannot reach `avahi-daemon`. The
+`avahi session failed` log line classifies why, in its `cause` field, and its `hint` field
+names the command to run or the setting to change:
+
+| `cause` | Meaning |
+|---------|---------|
+| `socket_missing` | The bus socket is not in the container. The mount is missing. |
+| `not_a_socket` | The path exists but is not a socket. Docker creates a directory when the host side of a bind mount is missing. |
+| `connection_refused` | The socket is stale: `dbus-daemon` restarted after the container started. |
+| `permission_denied` | The container's uid cannot write to the socket. |
+| `auth_rejected` | The host refused the uid the kernel reports for the socket, which points at a user-namespace remap. |
+| `hello_dropped` | The host cannot resolve the container's uid. Run `getent passwd` for that uid on the host. |
+| `policy_denied` | The host's D-Bus policy refuses this client access to Avahi. |
+
+### The exporter crash-loops with `D-Bus Hello: ... broken pipe`
+
+```
+WARN  avahi session failed  cause=hello_dropped uid=65532
+ERROR discovery backend failed  source=avahi error="avahi was unreachable for 30s: ..."
+```
+
+The host is healthy: the compose file mounts the socket, `dbus-daemon` and `avahi-daemon`
+run, and `avahi-browse` resolves devices. `dbus-daemon` authenticates the connection, then
+closes it while handling `Hello`, without sending a D-Bus error. It does that when it
+cannot look the peer's uid up in the host's passwd database, which it does before it
+accepts any connection. It records the refusal at verbose level only, so the host journal
+stays silent.
+
+Check the uid the container presents:
+
+```bash
+getent passwd 65532
+```
+
+No output means the host cannot resolve it. Run the container as a uid that exists on the
+host: `user: "568:568"` on TrueNAS SCALE, or `user: "65534:65534"` on most Linux hosts.
+
+### Avahi is the only source and the exporter exits
+
+`discovery.avahi.required: true` stops the process when Avahi is the only live backend,
+which is deliberate: a discovery-only exporter that discovers nothing has nothing to
+export. Note that `sources: [avahi, static]` with an empty `static:` list is still one
+live backend, because a static backend with no entries never starts.
+
+Add `discovery.static` entries, or set `discovery.avahi.required: false`.
 
 ### A device has no address
 
@@ -412,8 +464,8 @@ mDNS clears its backoff at once.
 
 ### Avahi restarts and discovery goes quiet
 
-The exporter detects this three ways: a D-Bus name-owner change, an Avahi state change,
-and a 30-second watchdog. The watchdog covers the case where `avahi-daemon` dies and the
+The exporter detects this three ways: a D-Bus name-owner change, a 30-second watchdog,
+and a periodic rebrowse. The watchdog covers the case where `avahi-daemon` dies and the
 D-Bus connection stays healthy, so the browsers go silent without any error.
 
 Alert on a stalled backend:

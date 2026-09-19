@@ -8,9 +8,11 @@
 #
 # Before deploying, verify on the host:
 #   ls -l /run/dbus/system_bus_socket
-#   systemctl is-active avahi-daemon
+#   systemctl is-active dbus avahi-daemon
 #   busctl --system list | grep -i avahi
-#   avahi-browse -rt _shelly._tcp _esphomelib._tcp
+#   getent passwd 568                     # the uid below has to resolve here
+#   avahi-browse -rt _shelly._tcp         # one service type per invocation
+#   avahi-browse -rt _esphomelib._tcp
 
 services:
   espressif-exporter:
@@ -19,7 +21,12 @@ services:
     restart: unless-stopped
     stop_grace_period: 20s
 
-    user: "65532:65532"
+    # 568 is TrueNAS SCALE's "apps" user, and the image's own 65532 will not work here.
+    # dbus-daemon looks the peer's uid up in the *host's* passwd database before it will
+    # accept the connection, and refuses one it cannot resolve — after authenticating it,
+    # and without a D-Bus error reply, which makes it look like a network fault. Set this
+    # to any uid that `getent passwd` resolves on your host.
+    user: "568:568"
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]

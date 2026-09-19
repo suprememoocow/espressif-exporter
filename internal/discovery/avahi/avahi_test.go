@@ -1,16 +1,21 @@
 package avahi
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
+	"net"
+	"os"
+	"strconv"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/godbus/dbus/v5"
-	"github.com/holoplot/go-avahi"
 
 	"github.com/suprememoocow/espressif-exporter/internal/config"
 	"github.com/suprememoocow/espressif-exporter/internal/discovery"
@@ -24,10 +29,13 @@ func discardLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Disca
 type fakeServer struct {
 	mu sync.Mutex
 
-	browsers    map[string]*avahi.ServiceBrowser
-	resolve     func(name string) (avahi.Service, error)
+	browsers    map[string]*browser
+	resolve     func(name string) (Service, error)
 	hostNameErr error
 	closed      bool
+
+	// owners stands in for the D-Bus name watch, so an avahi restart can be simulated.
+	owners chan string
 
 	browserCalls  int
 	resolveCalls  int
@@ -35,39 +43,37 @@ type fakeServer struct {
 }
 
 func newFakeServer() *fakeServer {
-	return &fakeServer{browsers: map[string]*avahi.ServiceBrowser{}}
+	return &fakeServer{browsers: map[string]*browser{}, owners: make(chan string, 4)}
 }
 
 func (f *fakeServer) ServiceBrowserNew(
-	_, _ int32, serviceType, _ string, _ uint32,
-) (*avahi.ServiceBrowser, error) {
+	_ context.Context, _, _ int32, serviceType, _ string, _ uint32,
+) (*browser, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.browserCalls++
-	b := &avahi.ServiceBrowser{
-		AddChannel:    make(chan avahi.Service, 8),
-		RemoveChannel: make(chan avahi.Service, 8),
+	b := &browser{
+		add:    make(chan Service, 8),
+		remove: make(chan Service, 8),
 	}
 	f.browsers[serviceType] = b
 	return b, nil
 }
 
-func (f *fakeServer) ServiceBrowserFree(*avahi.ServiceBrowser) {}
-
 func (f *fakeServer) ResolveService(
-	_, _ int32, name, _, _ string, _ int32, _ uint32,
-) (avahi.Service, error) {
+	_ context.Context, _, _ int32, name, _, _ string, _ int32, _ uint32,
+) (Service, error) {
 	f.mu.Lock()
 	f.resolveCalls++
 	fn := f.resolve
 	f.mu.Unlock()
 	if fn == nil {
-		return avahi.Service{}, errors.New("no resolver configured")
+		return Service{}, errors.New("no resolver configured")
 	}
 	return fn(name)
 }
 
-func (f *fakeServer) GetHostName() (string, error) {
+func (f *fakeServer) GetHostName(context.Context) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.hostNameCalls++
@@ -77,13 +83,15 @@ func (f *fakeServer) GetHostName() (string, error) {
 	return "truenas", nil
 }
 
+func (f *fakeServer) OwnerChanges() <-chan string { return f.owners }
+
 func (f *fakeServer) Close() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.closed = true
 }
 
-func (f *fakeServer) browser(t *testing.T, serviceType string) *avahi.ServiceBrowser {
+func (f *fakeServer) browser(t *testing.T, serviceType string) *browser {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
@@ -110,11 +118,11 @@ func testDiscoverer(t *testing.T, server avahiService, connectErr error) *Discov
 	cfg.StartupTimeout = 50 * time.Millisecond
 
 	d := New(cfg, []string{discovery.ServiceShelly}, discardLogger())
-	d.connect = func(context.Context, string) (*dbus.Conn, avahiService, error) {
+	d.connect = func(context.Context, string) (avahiService, error) {
 		if connectErr != nil {
-			return nil, nil, connectErr
+			return nil, connectErr
 		}
-		return nil, server, nil
+		return server, nil
 	}
 	return d
 }
@@ -144,9 +152,9 @@ func TestBusAddressPrecedence(t *testing.T) {
 // A device seen on the wire must reach the registry with its address and TXT intact.
 func TestResolvesAndEmits(t *testing.T) {
 	server := newFakeServer()
-	server.resolve = func(name string) (avahi.Service, error) {
-		return avahi.Service{
-			Interface: 2, Protocol: avahi.ProtoInet, Name: name,
+	server.resolve = func(name string) (Service, error) {
+		return Service{
+			Interface: 2, Protocol: protoInet, Name: name,
 			Type: discovery.ServiceShelly, Domain: "local",
 			Host: "shellyplus1pm-a8032ab12345.local", Address: "192.168.1.57", Port: 80,
 			Txt: [][]byte{[]byte("gen=2"), []byte("app=Plus1PM")},
@@ -161,8 +169,8 @@ func TestResolvesAndEmits(t *testing.T) {
 	go func() { _ = d.Run(ctx, out) }()
 
 	b := server.browser(t, discovery.ServiceShelly)
-	b.AddChannel <- avahi.Service{
-		Interface: 2, Protocol: avahi.ProtoInet,
+	b.add <- Service{
+		Interface: 2, Protocol: protoInet,
 		Name: "shellyplus1pm-a8032ab12345", Type: discovery.ServiceShelly, Domain: "local",
 	}
 
@@ -210,8 +218,8 @@ func TestRemoveIsEmittedAsAHint(t *testing.T) {
 	go func() { _ = d.Run(ctx, out) }()
 
 	b := server.browser(t, discovery.ServiceShelly)
-	b.RemoveChannel <- avahi.Service{
-		Interface: 2, Protocol: avahi.ProtoInet,
+	b.remove <- Service{
+		Interface: 2, Protocol: protoInet,
 		Name: "shellyplus1pm-a8032ab12345", Type: discovery.ServiceShelly, Domain: "local",
 	}
 
@@ -326,4 +334,152 @@ func contains(haystack, needle string) bool {
 		}
 		return false
 	})()
+}
+
+// captureLogger records what was logged, for the assertions that are about the log line
+// itself rather than about behaviour.
+func captureLogger() (*slog.Logger, func() string) {
+	var mu sync.Mutex
+	buf := &bytes.Buffer{}
+	h := slog.NewTextHandler(&lockedWriter{mu: &mu, w: buf}, &slog.HandlerOptions{Level: slog.LevelDebug})
+	return slog.New(h), func() string {
+		mu.Lock()
+		defer mu.Unlock()
+		return buf.String()
+	}
+}
+
+type lockedWriter struct {
+	mu *sync.Mutex
+	w  io.Writer
+}
+
+func (l *lockedWriter) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.w.Write(p)
+}
+
+// helloDropped is the failure this backend spent an afternoon misdiagnosing: the bus
+// authenticates the connection and then hangs up, because the host cannot resolve the
+// container's uid.
+func helloDropped() error {
+	return diagnose(stageHello, defaultBusAddress,
+		fmt.Errorf("D-Bus Hello: %w", &net.OpError{Op: "write", Err: syscall.EPIPE}))
+}
+
+// A browse hit must never be mistaken for anything else. Reading one as an avahi restart
+// tore the session down on the first device found, so discovery never completed a browse.
+func TestBrowseHitDoesNotEndTheSession(t *testing.T) {
+	server := newFakeServer()
+	server.resolve = func(name string) (Service, error) {
+		return Service{
+			Interface: 2, Protocol: protoInet, Name: name,
+			Type: discovery.ServiceShelly, Domain: "local",
+			Host: "shelly1pmg3-dcb4d9cc6eec.local", Address: "192.168.150.99", Port: 80,
+			Txt: [][]byte{[]byte("gen=3")},
+		}, nil
+	}
+
+	d := testDiscoverer(t, server, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	out := make(chan discovery.Event, 64)
+	go func() { _ = d.Run(ctx, out) }()
+
+	b := server.browser(t, discovery.ServiceShelly)
+	b.add <- Service{
+		Interface: 2, Protocol: protoInet,
+		Name: "shelly1pmg3-dcb4d9cc6eec", Type: discovery.ServiceShelly, Domain: "local",
+	}
+	awaitEvent(t, out, discovery.EventAdd)
+
+	// The session must still be the same one: a second source reset would mean it was
+	// torn down and rebuilt.
+	deadline := time.After(200 * time.Millisecond)
+	for {
+		select {
+		case ev := <-out:
+			if ev.Type == discovery.EventSourceReset {
+				t.Fatal("the session restarted after a browse hit")
+			}
+		case <-deadline:
+			if n := d.Health().Reconnects; n != 0 {
+				t.Errorf("reconnects = %d, want 0 after an ordinary browse hit", n)
+			}
+			if !d.Health().Up {
+				t.Error("the backend should still be up")
+			}
+			return
+		}
+	}
+}
+
+// Losing the bus name is the real avahi restart, and it does have to end the session:
+// the browser objects belong to the dead daemon.
+func TestOwnerLossEndsTheSession(t *testing.T) {
+	server := newFakeServer()
+	d := testDiscoverer(t, server, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	out := make(chan discovery.Event, 64)
+	go func() { _ = d.Run(ctx, out) }()
+
+	awaitEvent(t, out, discovery.EventSourceReset)
+	server.owners <- ""
+
+	awaitEvent(t, out, discovery.EventSourceReset)
+	if d.Health().Reconnects == 0 {
+		t.Error("the reconnect should have been counted")
+	}
+}
+
+// The fatal message is the last thing an operator sees before the process exits, so it
+// has to carry the specific fix rather than the generic one.
+func TestFatalCarriesTheClassifiedAdvice(t *testing.T) {
+	d := testDiscoverer(t, nil, helloDropped())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	err := d.Run(ctx, make(chan discovery.Event, 8))
+
+	var fatal *Fatal
+	if !errors.As(err, &fatal) {
+		t.Fatalf("err = %v, want a Fatal after the startup timeout", err)
+	}
+	msg := err.Error()
+	if !contains(msg, "getent passwd") || !contains(msg, strconv.Itoa(os.Geteuid())) {
+		t.Errorf("the message does not name the uid check: %q", msg)
+	}
+	if contains(msg, "bind-mounted") {
+		t.Errorf("the generic hint should give way to the specific one: %q", msg)
+	}
+}
+
+// The advice has to appear on the first failure, not only at the startup deadline 30
+// seconds later.
+func TestFirstFailureLogsTheAdvice(t *testing.T) {
+	log, dump := captureLogger()
+
+	cfg := config.Default().Discovery.Avahi
+	cfg.ReconnectMin = 10 * time.Millisecond
+	cfg.ReconnectMax = 10 * time.Millisecond
+	cfg.StartupTimeout = time.Hour // not the thing under test
+
+	d := New(cfg, []string{discovery.ServiceShelly}, log)
+	d.connect = func(context.Context, string) (avahiService, error) { return nil, helloDropped() }
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	_ = d.Run(ctx, make(chan discovery.Event, 8))
+
+	out := dump()
+	for _, want := range []string{"cause=hello_dropped", "stage=hello", "getent passwd", "hint="} {
+		if !contains(out, want) {
+			t.Errorf("the first failure did not log %q:\n%s", want, out)
+		}
+	}
 }
