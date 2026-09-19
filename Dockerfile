@@ -28,6 +28,9 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
 FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=build /out/espressif-exporter /espressif-exporter
 
+# distroless's own nonroot uid. A host whose dbus-daemon is asked to accept this
+# container needs the uid in its passwd database, which 65532 usually is not, so
+# deploy/docker-compose.yml overrides this with `user:`.
 USER 65532:65532
 EXPOSE 9826
 

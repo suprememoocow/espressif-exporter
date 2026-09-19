@@ -5,7 +5,6 @@ go 1.27.1
 require (
 	github.com/go-viper/mapstructure/v2 v2.5.0
 	github.com/godbus/dbus/v5 v5.2.2
-	github.com/holoplot/go-avahi v1.0.1
 	github.com/icholy/digest v1.2.0
 	github.com/knadh/koanf/parsers/yaml v1.1.1
 	github.com/knadh/koanf/providers/env v1.1.0

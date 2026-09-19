@@ -25,7 +25,6 @@ import (
 	"time"
 
 	"github.com/godbus/dbus/v5"
-	"github.com/holoplot/go-avahi"
 	"golang.org/x/sync/semaphore"
 
 	"github.com/suprememoocow/espressif-exporter/internal/config"
@@ -42,13 +41,20 @@ const Name = "avahi"
 // file rather than relying on the default.
 const defaultBusAddress = "unix:path=/run/dbus/system_bus_socket"
 
+// probeTimeout bounds the liveness round trip to avahi-daemon. A D-Bus call has no
+// deadline of its own, so without this a wedged daemon wedges the loop whose whole job is
+// to notice that it has wedged.
+const probeTimeout = 5 * time.Second
+
 // avahiService is the subset of the Avahi server we use, so the whole session state
 // machine can be tested without a D-Bus daemon.
 type avahiService interface {
-	ServiceBrowserNew(iface, protocol int32, serviceType, domain string, flags uint32) (*avahi.ServiceBrowser, error)
-	ServiceBrowserFree(b *avahi.ServiceBrowser)
-	ResolveService(iface, protocol int32, name, serviceType, domain string, aprotocol int32, flags uint32) (avahi.Service, error)
-	GetHostName() (string, error)
+	ServiceBrowserNew(ctx context.Context, iface, protocol int32, serviceType, domain string, flags uint32) (*browser, error)
+	ResolveService(ctx context.Context, iface, protocol int32, name, serviceType, domain string, aprotocol int32, flags uint32) (Service, error)
+	GetHostName(ctx context.Context) (string, error)
+	// OwnerChanges reports avahi-daemon coming or going. The client owns the D-Bus
+	// signal channel, so a browse hit can never arrive here.
+	OwnerChanges() <-chan string
 	Close()
 }
 
@@ -59,7 +65,7 @@ type Discoverer struct {
 	log          *slog.Logger
 
 	// connect is swappable so tests can drive the session machine with a fake.
-	connect func(ctx context.Context, address string) (*dbus.Conn, avahiService, error)
+	connect func(ctx context.Context, address string) (avahiService, error)
 
 	resolveSem *semaphore.Weighted
 	reconnects atomic.Uint64
@@ -71,13 +77,16 @@ type Discoverer struct {
 
 // New builds the backend.
 func New(cfg config.Avahi, serviceTypes []string, log *slog.Logger) *Discoverer {
-	return &Discoverer{
+	d := &Discoverer{
 		cfg:          cfg,
 		serviceTypes: serviceTypes,
 		log:          log.With("component", "avahi"),
-		connect:      connectDBus,
 		resolveSem:   semaphore.NewWeighted(int64(cfg.ResolveConcurrency)),
 	}
+	d.connect = func(ctx context.Context, address string) (avahiService, error) {
+		return connectDBus(ctx, address, d.log)
+	}
+	return d
 }
 
 // Name implements discovery.Discoverer.
@@ -111,29 +120,20 @@ func (d *Discoverer) Run(ctx context.Context, out chan<- discovery.Event) error 
 	backoff := d.cfg.ReconnectMin
 	started := time.Now()
 	everConnected := false
+	lastCause := causeUnknown
 
 	for ctx.Err() == nil {
 		reason, err := d.session(ctx, out)
 		if err == nil {
 			everConnected = true
+			lastCause = causeUnknown
 		} else {
 			d.setDown(err.Error())
-			if isAccessDenied(err) {
-				// A D-Bus policy refusal is not a connectivity problem and no amount of
-				// retrying fixes it, so say what to change rather than logging the same
-				// error every second.
-				d.log.Error("the host's D-Bus policy refused access to Avahi",
-					"error", err,
-					"hint", "check /etc/dbus-1/system.d/avahi-dbus.conf on the host")
-			} else {
-				d.log.Warn("avahi session failed", "error", err, "retry_in", backoff)
-			}
+			d.logFailure(err, backoff, &lastCause)
 
 			if !everConnected && d.cfg.Required && time.Since(started) > d.cfg.StartupTimeout {
-				return &Fatal{fmt.Errorf(
-					"avahi was unreachable for %s: %w (is /run/dbus/system_bus_socket "+
-						"bind-mounted, and is avahi-daemon running on the host?)",
-					d.cfg.StartupTimeout, err)}
+				return &Fatal{fmt.Errorf("avahi was unreachable for %s: %w (%s)",
+					d.cfg.StartupTimeout, err, adviceFor(err))}
 			}
 		}
 
@@ -161,16 +161,14 @@ func (d *Discoverer) session(ctx context.Context, out chan<- discovery.Event) (s
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	conn, server, err := d.connect(ctx, d.busAddress())
+	server, err := d.connect(ctx, d.busAddress())
 	if err != nil {
 		return "", err
 	}
-	defer func() {
-		server.Close()
-		if conn != nil {
-			_ = conn.Close()
-		}
-	}()
+	// Closing the client closes the D-Bus connection, which is what releases the browser
+	// objects in avahi-daemon. Freeing them individually is what the previous client
+	// library did, and it raced its own signal dispatch.
+	defer server.Close()
 
 	// Tell the registry its Avahi-sourced endpoints are unverified. Nothing is deleted:
 	// avahi replays its record cache to a new browser within seconds, so the normal
@@ -179,21 +177,13 @@ func (d *Discoverer) session(ctx context.Context, out chan<- discovery.Event) (s
 		Type: discovery.EventSourceReset, Source: Name, At: time.Now(),
 	})
 
-	browsers := make([]*avahi.ServiceBrowser, 0, len(d.serviceTypes))
-	defer func() {
-		for _, b := range browsers {
-			server.ServiceBrowserFree(b)
-		}
-	}()
-
 	var wg sync.WaitGroup
 	for _, serviceType := range d.serviceTypes {
 		b, err := server.ServiceBrowserNew(
-			avahi.InterfaceUnspec, avahi.ProtoUnspec, serviceType, "local", 0)
+			ctx, interfaceUnspec, protoUnspec, serviceType, "local", 0)
 		if err != nil {
 			return "browser_failed", fmt.Errorf("browsing %s: %w", serviceType, err)
 		}
-		browsers = append(browsers, b)
 
 		wg.Add(1)
 		go func() {
@@ -205,33 +195,19 @@ func (d *Discoverer) session(ctx context.Context, out chan<- discovery.Event) (s
 	d.setUp()
 	d.log.Info("avahi session established", "service_types", d.serviceTypes)
 
-	reason := d.watch(ctx, conn, server)
+	reason := d.watch(ctx, server)
 	cancel()
 	wg.Wait()
 	return reason, nil
 }
 
 // watch blocks until something ends the session, returning why.
-func (d *Discoverer) watch(ctx context.Context, conn *dbus.Conn, server avahiService) string {
+func (d *Discoverer) watch(ctx context.Context, server avahiService) string {
 	// avahi-daemon restarting is the failure mode that hides best: the D-Bus connection
 	// stays perfectly healthy because dbus-daemon is a separate process, and the
 	// browsers simply go silent — their channels are never closed and never receive
 	// anything again.
-	// nameOwner stays nil when there is no bus to watch (in tests), in which case the
-	// watchdog below is the sole detector — which is exactly the configuration the
-	// watchdog exists to cover, so the machine degrades correctly rather than breaking.
-	var nameOwner chan *dbus.Signal
-	if conn != nil {
-		nameOwner = make(chan *dbus.Signal, 8)
-		conn.Signal(nameOwner)
-		if err := conn.AddMatchSignal(
-			dbus.WithMatchInterface("org.freedesktop.DBus"),
-			dbus.WithMatchMember("NameOwnerChanged"),
-			dbus.WithMatchArg(0, "org.freedesktop.Avahi"),
-		); err != nil {
-			d.log.Warn("could not watch for avahi restarts; relying on the watchdog", "error", err)
-		}
-	}
+	owners := server.OwnerChanges()
 
 	watchdog := time.NewTicker(d.cfg.HealthCheckInterval)
 	defer watchdog.Stop()
@@ -244,14 +220,11 @@ func (d *Discoverer) watch(ctx context.Context, conn *dbus.Conn, server avahiSer
 		case <-ctx.Done():
 			return ""
 
-		case sig, ok := <-nameOwner:
+		case newOwner, ok := <-owners:
 			if !ok {
 				return "dbus_closed"
 			}
-			if sig == nil || len(sig.Body) < 3 {
-				continue
-			}
-			if newOwner, _ := sig.Body[2].(string); newOwner == "" {
+			if newOwner == "" {
 				return "name_lost"
 			}
 			// A new owner means avahi restarted; our browser objects belong to the dead
@@ -263,7 +236,7 @@ func (d *Discoverer) watch(ctx context.Context, conn *dbus.Conn, server avahiSer
 			// browsers are fed by a goroutine reading D-Bus signals, so if that source
 			// goes quiet the backend looks healthy while receiving nothing. Only an
 			// active round trip distinguishes the two.
-			if _, err := server.GetHostName(); err != nil {
+			if _, err := d.probe(ctx, server); err != nil {
 				consecutiveFailures++
 				if consecutiveFailures >= 2 {
 					return "watchdog"
@@ -282,21 +255,23 @@ func (d *Discoverer) watch(ctx context.Context, conn *dbus.Conn, server avahiSer
 
 // consume turns browser events into discovery events.
 func (d *Discoverer) consume(
-	ctx context.Context, server avahiService, b *avahi.ServiceBrowser,
+	ctx context.Context, server avahiService, b *browser,
 	serviceType string, out chan<- discovery.Event,
 ) {
+	// The client never closes these channels, so the exit from this loop is always
+	// ctx.Done. The ok guards below are belt and braces.
 	for {
 		select {
 		case <-ctx.Done():
 			return
 
-		case svc, ok := <-b.AddChannel:
+		case svc, ok := <-b.Add():
 			if !ok {
 				return
 			}
 			go d.resolve(ctx, server, svc, serviceType, out)
 
-		case svc, ok := <-b.RemoveChannel:
+		case svc, ok := <-b.Remove():
 			if !ok {
 				return
 			}
@@ -326,7 +301,7 @@ func (d *Discoverer) consume(
 // exhausting avahi-daemon's objects-per-client-max, which a long-lived resolver per
 // device would approach at this fleet size.
 func (d *Discoverer) resolve(
-	ctx context.Context, server avahiService, svc avahi.Service,
+	ctx context.Context, server avahiService, svc Service,
 	serviceType string, out chan<- discovery.Event,
 ) {
 	if err := d.resolveSem.Acquire(ctx, 1); err != nil {
@@ -337,38 +312,22 @@ func (d *Discoverer) resolve(
 	d.resolvers.Add(1)
 	defer d.resolvers.Add(-1)
 
-	type result struct {
-		svc avahi.Service
-		err error
-	}
-	// ResolveService has no context parameter, so it is bounded here instead. A
-	// goroutine stuck on a wedged daemon is released when the session tears down and
-	// closes the D-Bus connection, which errors out every pending call; the semaphore
-	// caps how many can be stuck in the meantime.
-	done := make(chan result, 1)
-	go func() {
-		resolved, err := server.ResolveService(
-			svc.Interface, svc.Protocol, svc.Name, svc.Type, svc.Domain, avahi.ProtoUnspec, 0)
-		done <- result{resolved, err}
-	}()
+	// A resolve against a wedged daemon must not pin a slot in the semaphore forever,
+	// so the call is bounded by its own deadline rather than by the session ending.
+	callCtx, cancel := context.WithTimeout(ctx, d.cfg.ResolveTimeout)
+	defer cancel()
 
-	select {
-	case <-ctx.Done():
+	resolved, err := server.ResolveService(
+		callCtx, svc.Interface, svc.Protocol, svc.Name, svc.Type, svc.Domain, protoUnspec, 0)
+	if err != nil {
+		d.log.Debug("resolve failed", "instance", svc.Name, "service", serviceType, "error", err)
 		return
-	case <-time.After(d.cfg.ResolveTimeout):
-		d.log.Debug("resolve timed out", "instance", svc.Name, "service", serviceType)
-		return
-	case r := <-done:
-		if r.err != nil {
-			d.log.Debug("resolve failed", "instance", svc.Name, "error", r.err)
-			return
-		}
-		d.emitResolved(ctx, r.svc, serviceType, out)
 	}
+	d.emitResolved(ctx, resolved, serviceType, out)
 }
 
 func (d *Discoverer) emitResolved(
-	ctx context.Context, svc avahi.Service, serviceType string, out chan<- discovery.Event,
+	ctx context.Context, svc Service, serviceType string, out chan<- discovery.Event,
 ) {
 	// Avahi hands back a hostname too, but it must never be dialled: the container has
 	// no mDNS resolver and no multicast path, so a .local name does not resolve there.
@@ -424,34 +383,82 @@ func (d *Discoverer) busAddress() string {
 
 // connectDBus opens a private connection to the system bus.
 //
-// SystemBusPrivate, not SystemBus: the latter returns a process-global, reference-counted
-// connection that cannot meaningfully be closed and reopened, which makes reconnecting
-// after an outage impossible.
-func connectDBus(ctx context.Context, address string) (*dbus.Conn, avahiService, error) {
+// Dial on an explicit address, not SystemBus: the latter returns a process-global,
+// reference-counted connection that cannot meaningfully be closed and reopened, which
+// makes reconnecting after an outage impossible.
+//
+// Every failure is classified before it is returned, because the causes need different
+// fixes on the host and are indistinguishable from the error text alone.
+func connectDBus(ctx context.Context, address string, log *slog.Logger) (avahiService, error) {
+	if ce := preflight(address); ce != nil {
+		return nil, ce
+	}
+
 	conn, err := dbus.Dial(address, dbus.WithContext(ctx))
 	if err != nil {
-		return nil, nil, fmt.Errorf("dialling %s: %w", address, err)
+		return nil, diagnose(stageDial, address, fmt.Errorf("dialling %s: %w", address, err))
 	}
 	if err := conn.Auth(nil); err != nil {
 		_ = conn.Close()
-		return nil, nil, fmt.Errorf("authenticating to D-Bus: %w", err)
+		return nil, diagnose(stageAuth, address, fmt.Errorf("authenticating to D-Bus: %w", err))
 	}
 	if err := conn.Hello(); err != nil {
 		_ = conn.Close()
-		return nil, nil, fmt.Errorf("D-Bus Hello: %w", err)
+		return nil, diagnose(stageHello, address, fmt.Errorf("D-Bus Hello: %w", err))
 	}
 
-	server, err := avahi.ServerNew(conn)
+	server, err := newClient(conn, log)
 	if err != nil {
 		_ = conn.Close()
-		return nil, nil, fmt.Errorf("connecting to avahi-daemon: %w", err)
+		return nil, diagnose(stageAvahi, address, fmt.Errorf("connecting to avahi-daemon: %w", err))
 	}
-	if _, err := server.GetHostName(); err != nil {
+	// One round trip before declaring the session up, so a daemon that is registered on
+	// the bus but not answering is caught here rather than looking healthy forever.
+	probeCtx, cancel := context.WithTimeout(ctx, probeTimeout)
+	defer cancel()
+	if _, err := server.GetHostName(probeCtx); err != nil {
 		server.Close()
-		_ = conn.Close()
-		return nil, nil, fmt.Errorf("avahi-daemon did not respond: %w", err)
+		return nil, diagnose(stageAvahi, address, fmt.Errorf("avahi-daemon did not respond: %w", err))
 	}
-	return conn, server, nil
+	return server, nil
+}
+
+// probe asks avahi-daemon its hostname, bounded. Which answer comes back does not
+// matter; that one comes back at all is the only proof this session still works.
+func (d *Discoverer) probe(ctx context.Context, server avahiService) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, probeTimeout)
+	defer cancel()
+	return server.GetHostName(ctx)
+}
+
+// logFailure reports a session failure, with its advice the first time and on every change
+// of cause.
+//
+// The advice is a paragraph and the retry loop runs as often as once a second, so
+// repeating it verbatim would bury everything else in the log. Logging it on change keeps
+// the first line an operator reads actionable without making the rest unreadable.
+func (d *Discoverer) logFailure(err error, backoff time.Duration, last *cause) {
+	var ce *connError
+	if !errors.As(err, &ce) {
+		d.log.Warn("avahi session failed", "error", err, "retry_in", backoff)
+		return
+	}
+	if *last == ce.cause {
+		d.log.Warn("avahi session failed", "error", err, "cause", ce.Cause(), "retry_in", backoff)
+		return
+	}
+	*last = ce.cause
+
+	if ce.cause == causePolicyDenied {
+		// A policy refusal is not a connectivity problem and no amount of retrying fixes
+		// it, so it is reported as an error and says what to change.
+		d.log.Error("the host's D-Bus policy refused access to Avahi",
+			"error", err, "cause", ce.Cause(), "hint", ce.Advice())
+		return
+	}
+	d.log.Warn("avahi session failed",
+		"error", err, "cause", ce.Cause(), "stage", ce.Stage(),
+		"uid", ce.euid, "gid", ce.egid, "hint", ce.Advice(), "retry_in", backoff)
 }
 
 func (d *Discoverer) setUp() {
@@ -476,7 +483,7 @@ func emit(ctx context.Context, out chan<- discovery.Event, ev discovery.Event) {
 }
 
 func protocolName(proto int32) string {
-	if proto == avahi.ProtoInet6 {
+	if proto == protoInet6 {
 		return discovery.ProtoIPv6
 	}
 	return discovery.ProtoIPv4

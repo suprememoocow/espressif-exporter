@@ -33,6 +33,9 @@ discovery:
   avahi:
     # Empty means $DBUS_SYSTEM_BUS_ADDRESS, then unix:path=/run/dbus/system_bus_socket.
     dbus_address: ""
+    # Exits if Avahi is unreachable at startup and is the only live backend. Note that an
+    # empty static list below still counts as one live backend, because a static backend
+    # with no entries never starts.
     required: true
     startup_timeout: 30s
     resolve_timeout: 5s
