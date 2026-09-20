@@ -75,13 +75,21 @@ func (c *Collector) Probe(
 
 func (c *Collector) emitDeviceMetrics(e *metrics.Emitter, snap snapshot) {
 	info := snap.Info
+
+	// The zero Addr stringifies to "invalid IP", which would read as a real value on a
+	// dashboard. An empty label is dropped by Prometheus, which is the honest answer.
+	ip := ""
+	if snap.Addr.IsValid() {
+		ip = snap.Addr.String()
+	}
+
 	e.Info(metrics.FamilyDeviceInfo,
 		info.GetMacAddress(),
 		info.GetModel(),
 		info.GetManufacturer(),
 		info.GetEsphomeVersion(),
 		"", // gen is a Shelly concept
-		"",
+		ip,
 		snap.Transport,
 		info.GetFriendlyName(),
 	)
