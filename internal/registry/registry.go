@@ -381,14 +381,16 @@ func (r *Registry) applyRemoveHint(ev discovery.Event) bool {
 func (r *Registry) markSourceUnverified(source string, at time.Time) bool {
 	changed := false
 	for _, dev := range r.devices {
+		devChanged := false
 		for _, ep := range dev.endpoints {
 			if ep.source == source && !ep.unverified {
 				ep.unverified = true
 				ep.removeHintAt = at
-				changed = true
+				devChanged = true
 			}
 		}
-		if changed {
+		if devChanged {
+			changed = true
 			dev.Unverified = allUnverified(dev)
 		}
 	}
@@ -418,6 +420,12 @@ func (r *Registry) applyScrapeResult(res ScrapeResult) bool {
 	for _, ep := range dev.endpoints {
 		if ep.Addr == res.Addr {
 			ep.unverified = false
+			// The address answered, so it is observed just as surely as if mDNS had
+			// announced it. Without this the endpoint still ages out under endpoint_ttl
+			// while the device survives under device_ttl, leaving it known but
+			// addressless: every probe fails with "no address" and the ESPHome manager
+			// closes a perfectly healthy connection.
+			ep.ObservedAt = res.At
 		}
 	}
 	dev.Unverified = allUnverified(dev)
@@ -432,6 +440,9 @@ func (r *Registry) expire(now time.Time) bool {
 		if dev.Static {
 			continue
 		}
+		// Per device: a previous device losing an endpoint must not drag this one
+		// through a pointless recomputeAddrs and touch.
+		devChanged := false
 		for k, ep := range dev.endpoints {
 			expired := now.Sub(ep.ObservedAt) > r.cfg.EndpointTTL
 			// An endpoint that received a remove hint, stayed unverified past the grace
@@ -442,10 +453,11 @@ func (r *Registry) expire(now time.Time) bool {
 
 			if expired || hinted {
 				delete(dev.endpoints, k)
-				changed = true
+				devChanged = true
 			}
 		}
-		if changed {
+		if devChanged {
+			changed = true
 			r.recomputeAddrs(dev, "expiry")
 			r.touch(dev)
 		}
@@ -496,6 +508,19 @@ func (r *Registry) recomputeAddrs(dev *deviceState, reason string) {
 		r.log.Warn("device has no routable address; every observed address was filtered out",
 			"device", dev.ID, "rejected", rejected,
 			"hint", "check discovery.allow_cidrs, discovery.deny_cidrs and discovery.ipv6")
+	}
+
+	// Losing the last address used to be completely silent, which made the resulting
+	// metric gap look like a device fault rather than a TTL. In practice only expiry can
+	// empty the set, so name the TTL that did it.
+	if len(next) == 0 && len(rejected) == 0 && len(dev.Addrs) > 0 {
+		r.log.Warn("device has no usable address left; its metrics will stop",
+			"device", dev.ID, "reason", reason,
+			"last_seen", dev.LastSeen.Format(time.RFC3339),
+			"endpoint_ttl", r.cfg.EndpointTTL,
+			"hint", "registry.endpoint_ttl must exceed the interval at which the "+
+				"discovery source re-observes a device; for avahi that is "+
+				"discovery.avahi.rebrowse_interval")
 	}
 
 	if !slices.Equal(next, dev.Addrs) {

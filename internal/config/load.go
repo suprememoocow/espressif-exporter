@@ -198,6 +198,16 @@ func (c *Config) Validate() error {
 			c.Registry.DeviceTTL, c.Registry.EndpointTTL)
 	}
 
+	// Avahi replays its record cache only to a newly created browser, so a rebrowse is
+	// the only thing that re-observes a device that is quiet on mDNS. A shorter
+	// endpoint_ttl therefore guarantees that every device loses its address partway
+	// through each rebrowse cycle, taking its metrics with it.
+	if seen["avahi"] && c.Registry.EndpointTTL <= c.Discovery.Avahi.RebrowseInterval {
+		add("registry.endpoint_ttl (%s) must exceed discovery.avahi.rebrowse_interval "+
+			"(%s): a rebrowse is the only thing that re-observes an Avahi endpoint",
+			c.Registry.EndpointTTL, c.Discovery.Avahi.RebrowseInterval)
+	}
+
 	// A password with no username fails as a 401 at scrape time, which is much harder to
 	// diagnose than a startup error.
 	if c.Shelly.Auth.Password.IsSet() && c.Shelly.Auth.Username == "" {

@@ -81,7 +81,14 @@ type StaticEntry struct {
 }
 
 type Registry struct {
-	RefreshInterval  time.Duration `koanf:"refresh_interval"`
+	RefreshInterval time.Duration `koanf:"refresh_interval"`
+
+	// EndpointTTL is how long an address survives with nothing confirming it. Both an
+	// mDNS announcement and a successful scrape count as confirmation, so this is not a
+	// measure of how chatty a device is on mDNS. It must exceed the interval at which
+	// discovery re-observes a device: Avahi only replays its cache to a new browser, so
+	// for the Avahi backend that interval is avahi.rebrowse_interval, and a shorter TTL
+	// leaves every device addressless between rebrowses.
 	EndpointTTL      time.Duration `koanf:"endpoint_ttl"`
 	DeviceTTL        time.Duration `koanf:"device_ttl"`
 	RemoveGrace      time.Duration `koanf:"remove_grace"`
@@ -230,8 +237,8 @@ func Default() Config {
 		},
 		Registry: Registry{
 			RefreshInterval:  5 * time.Minute,
-			EndpointTTL:      10 * time.Minute,
-			DeviceTTL:        30 * time.Minute,
+			EndpointTTL:      45 * time.Minute,
+			DeviceTTL:        90 * time.Minute,
 			RemoveGrace:      5 * time.Minute,
 			SnapshotCoalesce: 250 * time.Millisecond,
 		},

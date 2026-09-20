@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"math"
 	"net/netip"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -106,12 +107,35 @@ func sensorEntity(key uint32, objectID, unit string, stateClass pb.SensorStateCl
 
 func testDevice(t *testing.T, dial Dialer) *device {
 	t.Helper()
+	return testDeviceWithLiveness(t, dial, nil)
+}
+
+func testDeviceWithLiveness(t *testing.T, dial Dialer, liveness LivenessReporter) *device {
+	t.Helper()
 	cfg := config.Default().ESPHome
 	cfg.PingInterval = 20 * time.Millisecond
 	cfg.RefreshInterval = 20 * time.Millisecond
 	cfg.ConnectBudget = 2 * time.Second
 	return newDevice("mac:a4cf129b3e70", "bedroom", netip.MustParseAddr("192.168.1.10"),
-		6053, 1, cfg, dial, discardLogger())
+		6053, 1, cfg, dial, liveness, discardLogger())
+}
+
+// fakeLiveness collects what the device tells the registry.
+type fakeLiveness struct {
+	mu      sync.Mutex
+	results []registry.ScrapeResult
+}
+
+func (f *fakeLiveness) ReportScrape(res registry.ScrapeResult) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.results = append(f.results, res)
+}
+
+func (f *fakeLiveness) snapshot() []registry.ScrapeResult {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.results)
 }
 
 func waitFor(t *testing.T, what string, cond func() bool) {
@@ -251,7 +275,7 @@ func TestTransportFallsBackToPlaintextOnce(t *testing.T) {
 			}
 			attempts = append(attempts, "plaintext")
 			return conn, nil
-		}, discardLogger())
+		}, nil, discardLogger())
 
 	got, mode, err := d.connect(context.Background())
 	if err != nil {
@@ -280,7 +304,7 @@ func TestRequireEncryptionNeverFallsBack(t *testing.T) {
 				plaintextTried = true
 			}
 			return nil, errors.New("Handshake MAC failure")
-		}, discardLogger())
+		}, nil, discardLogger())
 
 	if _, _, err := d.connect(context.Background()); err == nil {
 		t.Fatal("expected the connection to fail")
@@ -329,7 +353,7 @@ func TestManagerWaitsForExitBeforeReconnecting(t *testing.T) {
 
 	cfg := config.Default().ESPHome
 	cfg.ConnectBudget = 2 * time.Second
-	m := NewManager(cfg, discardLogger())
+	m := NewManager(cfg, nil, discardLogger())
 	m.dial = func(context.Context, string, DialOptions) (Conn, error) {
 		n := live.Add(1)
 		for {
@@ -383,4 +407,49 @@ func (c *closingConn) Close() error {
 	}
 	c.mu.Unlock()
 	return c.fakeConn.Close()
+}
+
+// The exporter must not depend on Prometheus scraping /probe to keep its own connections
+// from being reaped for mDNS silence: a live API connection is the evidence, so the
+// manager reports it itself.
+func TestConnectionReportsLivenessToTheRegistry(t *testing.T) {
+	conn := newFakeConn(sensorEntity(1, "temperature", "°C", pb.SensorStateClass_STATE_CLASS_MEASUREMENT))
+	live := &fakeLiveness{}
+	d := testDeviceWithLiveness(t, func(context.Context, string, DialOptions) (Conn, error) {
+		return conn, nil
+	}, live)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go d.run(ctx)
+
+	// One report on connect, then one per ping.
+	waitFor(t, "two liveness reports", func() bool { return len(live.snapshot()) >= 2 })
+
+	for i, res := range live.snapshot() {
+		if res.DeviceID != "mac:a4cf129b3e70" {
+			t.Errorf("report %d: device = %q, want mac:a4cf129b3e70", i, res.DeviceID)
+		}
+		if res.Addr != netip.MustParseAddr("192.168.1.10") {
+			t.Errorf("report %d: addr = %s, want 192.168.1.10", i, res.Addr)
+		}
+		if !res.Success {
+			t.Errorf("report %d: reported a failure; only success belongs here", i)
+		}
+		if res.At.IsZero() {
+			t.Errorf("report %d: no timestamp, so it cannot renew an endpoint", i)
+		}
+	}
+}
+
+// A nil reporter is a supported configuration and must not panic.
+func TestNilLivenessReporterIsHarmless(t *testing.T) {
+	conn := newFakeConn(sensorEntity(1, "temperature", "°C", pb.SensorStateClass_STATE_CLASS_MEASUREMENT))
+	d := testDevice(t, func(context.Context, string, DialOptions) (Conn, error) { return conn, nil })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go d.run(ctx)
+
+	waitFor(t, "connection", func() bool { return d.cache.Snapshot().Connected })
 }
