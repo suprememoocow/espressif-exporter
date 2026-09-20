@@ -12,11 +12,22 @@ import (
 	"github.com/suprememoocow/espressif-exporter/internal/registry"
 )
 
+// LivenessReporter receives proof that a device answered. *registry.Registry implements
+// it; the interface keeps the manager testable and the dependency one-way.
+//
+// Without this the exporter depends on Prometheus scraping /probe to keep its own
+// connections from being reaped for mDNS silence, which is backwards: a live API
+// connection is the strongest liveness evidence there is.
+type LivenessReporter interface {
+	ReportScrape(registry.ScrapeResult)
+}
+
 // Manager keeps exactly one live connection per known ESPHome device.
 type Manager struct {
-	cfg  config.ESPHome
-	log  *slog.Logger
-	dial Dialer
+	cfg      config.ESPHome
+	log      *slog.Logger
+	dial     Dialer
+	liveness LivenessReporter
 
 	// connectSem stops a router reboot turning into a hundred simultaneous SYNs.
 	connectSem *semaphore.Weighted
@@ -33,12 +44,14 @@ type managedDevice struct {
 	addr   string
 }
 
-// NewManager builds the manager. Call Run before Sync.
-func NewManager(cfg config.ESPHome, log *slog.Logger) *Manager {
+// NewManager builds the manager. Call Run before Sync. A nil liveness reporter is
+// allowed and simply means nothing is told about live connections.
+func NewManager(cfg config.ESPHome, liveness LivenessReporter, log *slog.Logger) *Manager {
 	return &Manager{
 		cfg:        cfg,
 		log:        log.With("component", "esphome"),
 		dial:       dialReal,
+		liveness:   liveness,
 		connectSem: semaphore.NewWeighted(int64(cfg.MaxConcurrentConnects)),
 		devices:    map[string]*managedDevice{},
 	}
@@ -77,9 +90,16 @@ func (m *Manager) Sync(devices []registry.Device) {
 	}
 
 	wanted := make(map[string]registry.Device, len(devices))
+	// A device the registry still knows but cannot address is a different failure from
+	// one that left the registry: the first points at a TTL, the second at a device that
+	// really went away. Logging both as "gone" hides the difference exactly when it
+	// matters.
+	addressless := make(map[string]bool, len(devices))
 	for _, d := range devices {
 		if _, ok := d.Primary(); ok {
 			wanted[d.ID] = d
+		} else {
+			addressless[d.ID] = true
 		}
 	}
 
@@ -94,7 +114,15 @@ func (m *Manager) Sync(devices []registry.Device) {
 	m.mu.Unlock()
 
 	for _, d := range toStop {
-		m.log.Info("device gone; closing connection", "device", d.dev.id)
+		if addressless[d.dev.id] {
+			m.log.Warn("device lost its address; closing connection",
+				"device", d.dev.id, "was", d.addr,
+				"hint", "the registry still knows this device but has no usable "+
+					"address for it; check registry.endpoint_ttl against how often "+
+					"discovery re-observes it")
+		} else {
+			m.log.Info("device gone; closing connection", "device", d.dev.id)
+		}
 		d.cancel()
 		m.awaitExit(d)
 	}
@@ -132,7 +160,7 @@ func (m *Manager) ensure(ctx context.Context, id string, d registry.Device) {
 	}
 
 	devCtx, cancel := context.WithCancel(ctx)
-	dev := newDevice(id, d.Name, addr, d.Port, d.Epoch, m.cfg, m.gatedDial(), m.log)
+	dev := newDevice(id, d.Name, addr, d.Port, d.Epoch, m.cfg, m.gatedDial(), m.liveness, m.log)
 
 	m.mu.Lock()
 	m.devices[id] = &managedDevice{dev: dev, cancel: cancel, epoch: d.Epoch, addr: addrStr}

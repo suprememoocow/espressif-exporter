@@ -18,6 +18,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/suprememoocow/espressif-exporter/internal/config"
+	"github.com/suprememoocow/espressif-exporter/internal/registry"
 )
 
 // transportMode records how a device is spoken to, once decided.
@@ -41,9 +42,10 @@ type device struct {
 	cfg  config.ESPHome
 	log  *slog.Logger
 
-	dial  Dialer
-	cache *deviceCache
-	clock func() time.Time
+	dial     Dialer
+	cache    *deviceCache
+	clock    func() time.Time
+	liveness LivenessReporter
 
 	addr  netip.Addr
 	port  uint16
@@ -57,14 +59,32 @@ type device struct {
 }
 
 func newDevice(id, name string, addr netip.Addr, port uint16, epoch uint64,
-	cfg config.ESPHome, dial Dialer, log *slog.Logger) *device {
+	cfg config.ESPHome, dial Dialer, liveness LivenessReporter, log *slog.Logger) *device {
 	return &device{
 		id: id, name: name, cfg: cfg, dial: dial, addr: addr, port: port, epoch: epoch,
-		log:    log.With("device", id, "addr", addr.String()),
-		cache:  newDeviceCache(cfg.MaxOrphanStates),
-		clock:  time.Now,
-		exited: make(chan struct{}),
+		log:      log.With("device", id, "addr", addr.String()),
+		cache:    newDeviceCache(cfg.MaxOrphanStates),
+		clock:    time.Now,
+		liveness: liveness,
+		exited:   make(chan struct{}),
 	}
+}
+
+// reportAlive tells the registry this device's address answered, so that neither
+// endpoint_ttl nor device_ttl reaps a node that is connected and talking to us. Only
+// success is ever reported: the /probe path owns failure semantics.
+func (d *device) reportAlive() {
+	if d.liveness == nil {
+		return
+	}
+	// ReportScrape never blocks; it drops the hint if the registry actor is busy, which
+	// is fine because the next ping re-reports within ping_interval.
+	d.liveness.ReportScrape(registry.ScrapeResult{
+		DeviceID: d.id,
+		Addr:     d.addr,
+		Success:  true,
+		At:       d.clock(),
+	})
 }
 
 // run drives the connection for the device's lifetime.
@@ -166,6 +186,7 @@ func (d *device) session(ctx context.Context) (cleanDisconnect bool, err error) 
 	defer stopWatch()
 
 	d.cache.setConnected(true, string(mode), d.clock())
+	d.reportAlive()
 	d.log.Info("connected", "transport", mode,
 		"esphome_version", info.GetEsphomeVersion(), "model", info.GetModel())
 
@@ -207,6 +228,7 @@ func (d *device) pump(
 			rtt := d.clock().Sub(start)
 			d.cache.setPing(rtt.Seconds())
 			d.cache.touch(d.clock())
+			d.reportAlive()
 
 			// TCP alone takes ten to fifteen minutes to notice a powered-off ESP, so a
 			// stalled stream is detected here rather than by the socket.

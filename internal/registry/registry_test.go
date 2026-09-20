@@ -162,8 +162,10 @@ func TestSuccessfulScrapeKeepsDeviceAlive(t *testing.T) {
 	ev.Endpoint.ObservedAt = clk.Now()
 	r.applyEvent(ev)
 
-	// Past device_ttl since the last mDNS announcement, but scraping fine throughout.
-	for range 10 {
+	// Past both endpoint_ttl and device_ttl since the last mDNS announcement, but
+	// scraping fine throughout.
+	deadline := clk.Now().Add(r.cfg.DeviceTTL + 10*time.Minute)
+	for clk.Now().Before(deadline) {
 		clk.Advance(5 * time.Minute)
 		r.applyScrapeResult(ScrapeResult{
 			DeviceID: "mac:a8032ab1c2d3",
@@ -178,6 +180,61 @@ func TestSuccessfulScrapeKeepsDeviceAlive(t *testing.T) {
 	if r.Snapshot().Len() != 1 {
 		t.Fatal("a device scraping successfully was expired on mDNS silence alone")
 	}
+
+	// Surviving is not enough. A device kept alive by device_ttl but stripped of its
+	// endpoints by endpoint_ttl is known and unusable: every probe fails with "no
+	// address" and the ESPHome manager closes its connection.
+	dev, ok := r.Snapshot().Get("mac:a8032ab1c2d3")
+	if !ok {
+		t.Fatal("device missing from the snapshot")
+	}
+	if _, ok := dev.Primary(); !ok {
+		t.Error("a device scraping successfully lost its address to endpoint_ttl")
+	}
+}
+
+// A successful scrape is evidence about the address that answered, not about every
+// record the device ever announced. An IPv6 endpoint nothing can reach must still age out.
+func TestScrapeSuccessRenewsTheScrapedEndpointOnly(t *testing.T) {
+	r, clk := testRegistry(t)
+
+	v4 := addEvent(discovery.KindShelly, discovery.ServiceShelly,
+		"shellyplus1pm-a8032ab1c2d3", "192.168.1.57", 80, nil)
+	v4.Endpoint.ObservedAt = clk.Now()
+	r.applyEvent(v4)
+
+	v6 := addEvent(discovery.KindShelly, discovery.ServiceShelly,
+		"shellyplus1pm-a8032ab1c2d3", "192.168.1.58", 80, nil)
+	v6.Endpoint.Key.Protocol = discovery.ProtoIPv6
+	v6.Endpoint.ObservedAt = clk.Now()
+	r.applyEvent(v6)
+
+	dev := r.devices["mac:a8032ab1c2d3"]
+	if len(dev.endpoints) != 2 {
+		t.Fatalf("setup: got %d endpoints, want 2", len(dev.endpoints))
+	}
+
+	// Well past endpoint_ttl, scraping .57 throughout and never .58.
+	deadline := clk.Now().Add(r.cfg.EndpointTTL + 10*time.Minute)
+	for clk.Now().Before(deadline) {
+		clk.Advance(5 * time.Minute)
+		r.applyScrapeResult(ScrapeResult{
+			DeviceID: "mac:a8032ab1c2d3",
+			Addr:     netip.MustParseAddr("192.168.1.57"),
+			Success:  true,
+			At:       clk.Now(),
+		})
+		r.expire(clk.Now())
+	}
+
+	if len(dev.endpoints) != 1 {
+		t.Fatalf("got %d endpoints, want only the scraped one to survive", len(dev.endpoints))
+	}
+	for _, ep := range dev.endpoints {
+		if ep.Addr != netip.MustParseAddr("192.168.1.57") {
+			t.Errorf("surviving endpoint is %s, want the scraped 192.168.1.57", ep.Addr)
+		}
+	}
 }
 
 func TestExpiresAfterDeviceTTL(t *testing.T) {
@@ -188,7 +245,7 @@ func TestExpiresAfterDeviceTTL(t *testing.T) {
 	ev.Endpoint.ObservedAt = clk.Now()
 	r.applyEvent(ev)
 
-	clk.Advance(31 * time.Minute)
+	clk.Advance(r.cfg.DeviceTTL + time.Minute)
 	r.expire(clk.Now())
 	r.publish()
 

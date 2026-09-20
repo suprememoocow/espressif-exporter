@@ -41,6 +41,9 @@ discovery:
     resolve_timeout: 5s
     resolve_concurrency: 8
     health_check_interval: 30s
+    # Avahi replays its record cache only to a brand-new browser, so this rebrowse is the
+    # only thing that re-observes a device that is quiet on mDNS. registry.endpoint_ttl
+    # must stay comfortably above it.
     rebrowse_interval: 30m
 
   static:
@@ -48,10 +51,14 @@ discovery:
 
 registry:
   refresh_interval: 5m
-  endpoint_ttl: 10m
+  # How long an address survives with nothing confirming it. An mDNS announcement and a
+  # successful scrape both count, so this is not a measure of mDNS chattiness. Keep it
+  # above discovery.avahi.rebrowse_interval, or every device goes addressless between
+  # rebrowses and its metrics disappear with it.
+  endpoint_ttl: 45m
   # Generous on purpose: on a home LAN a twenty-minute absence is a wifi problem, and an
   # alertable probe_success 0 beats a series that silently disappears.
-  device_ttl: 30m
+  device_ttl: 90m
   remove_grace: 5m
 
 probe:

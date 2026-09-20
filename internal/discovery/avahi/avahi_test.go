@@ -483,3 +483,46 @@ func TestFirstFailureLogsTheAdvice(t *testing.T) {
 		}
 	}
 }
+
+// The routine rebrowse is not a failure. Treating it as one made the reconnect delay
+// double on every cycle until a healthy process was pinned at reconnect_max, leaving it
+// with no browsers at all for a full minute every half hour — and, because a rebrowse is
+// the only thing that re-observes an Avahi endpoint, stretching the window in which
+// devices age out of the registry.
+func TestRebrowseDoesNotClimbTheReconnectLadder(t *testing.T) {
+	server := newFakeServer()
+	d := testDiscoverer(t, server, nil)
+	d.cfg.ReconnectMin = time.Millisecond
+	d.cfg.ReconnectMax = 500 * time.Millisecond
+	d.cfg.RebrowseInterval = 10 * time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	out := make(chan discovery.Event, 1024)
+	// Drain, so a full channel never becomes the thing that paces the loop.
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-out:
+			}
+		}
+	}()
+	go func() { _ = d.Run(ctx, out) }()
+
+	time.Sleep(500 * time.Millisecond)
+	cancel()
+
+	server.mu.Lock()
+	sessions := server.browserCalls
+	server.mu.Unlock()
+
+	// With the ladder climbing, the delays go 1, 2, 4, 8, 16, 32, 64, 128, 256ms and only
+	// about eight sessions fit. Reset each time, each cycle costs ~11ms, so dozens do.
+	if sessions < 20 {
+		t.Errorf("%d sessions in 500ms; want at least 20, so the reconnect delay is "+
+			"not doubling across routine rebrowses", sessions)
+	}
+}

@@ -127,6 +127,17 @@ func (d *Discoverer) Run(ctx context.Context, out chan<- discovery.Event) error 
 		if err == nil {
 			everConnected = true
 			lastCause = causeUnknown
+
+			// A rebrowse is the one exit that is routine rather than a fault, and by
+			// definition the session survived a full rebrowse_interval to reach it, so
+			// it resets the ladder. Without this the delay doubles on every cycle until
+			// a perfectly healthy process is pinned at reconnect_max, spending a full
+			// minute with no browsers at all every half hour. Every other reason —
+			// dbus_closed, name_lost, name_changed, watchdog — is a fault and keeps
+			// climbing, so a genuinely flapping avahi still backs off.
+			if reason == reasonRebrowse {
+				backoff = d.cfg.ReconnectMin
+			}
 		} else {
 			d.setDown(err.Error())
 			d.logFailure(err, backoff, &lastCause)
@@ -201,6 +212,9 @@ func (d *Discoverer) session(ctx context.Context, out chan<- discovery.Event) (s
 	return reason, nil
 }
 
+// reasonRebrowse is the one session exit that is routine rather than a fault.
+const reasonRebrowse = "rebrowse"
+
 // watch blocks until something ends the session, returning why.
 func (d *Discoverer) watch(ctx context.Context, server avahiService) string {
 	// avahi-daemon restarting is the failure mode that hides best: the D-Bus connection
@@ -248,7 +262,7 @@ func (d *Discoverer) watch(ctx context.Context, server avahiService) string {
 		case <-rebrowse.C:
 			// Periodically recycle the browsers, which flushes any subscription that
 			// has silently wedged and forces fresh queries.
-			return "rebrowse"
+			return reasonRebrowse
 		}
 	}
 }

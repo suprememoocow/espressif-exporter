@@ -468,10 +468,18 @@ The exporter detects this three ways: a D-Bus name-owner change, a 30-second wat
 and a periodic rebrowse. The watchdog covers the case where `avahi-daemon` dies and the
 D-Bus connection stays healthy, so the browsers go silent without any error.
 
-Alert on a stalled backend:
+The rebrowse matters for more than recovery. Avahi replays its record cache only to a
+newly created browser, and stays silent about services it already knows, so for a device
+that is quiet on mDNS the rebrowse is the only thing that re-observes it. Keep
+`registry.endpoint_ttl` above `discovery.avahi.rebrowse_interval`: if it is shorter, every
+device loses its address partway through each cycle and its metrics vanish until the next
+rebrowse. The exporter refuses to start on that combination.
+
+Alert on a stalled backend. The threshold has to stay well clear of
+`rebrowse_interval`, or a healthy rebrowse trips it:
 
 ```promql
-time() - espressif_exporter_discovery_last_event_timestamp_seconds{source="avahi"} > 1800
+time() - espressif_exporter_discovery_last_event_timestamp_seconds{source="avahi"} > 3600
 ```
 
 ## Development

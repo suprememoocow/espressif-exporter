@@ -64,14 +64,18 @@ func New(cfg config.Config, log *slog.Logger) (*App, error) {
 	families := metrics.NewRegistry()
 	self := metrics.NewSelf(version.Version, version.Commit, runtime.Version())
 
+	// The manager reports its live connections back to the registry, so the registry has
+	// to exist first.
+	reg := registry.New(cfg.Registry, policy, log)
+
 	a := &App{
 		cfg:         cfg,
 		log:         log,
-		registry:    registry.New(cfg.Registry, policy, log),
+		registry:    reg,
 		self:        self,
 		limiter:     probe.NewLimiter(cfg.Probe),
 		shelly:      shelly.New(cfg.Shelly, families, log),
-		esphomeMgr:  esphome.NewManager(cfg.ESPHome, log),
+		esphomeMgr:  esphome.NewManager(cfg.ESPHome, reg, log),
 		lastUnknown: map[string]uint64{},
 		lastSkipped: map[string]uint64{},
 	}
