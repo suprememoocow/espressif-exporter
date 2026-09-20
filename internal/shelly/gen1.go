@@ -114,8 +114,13 @@ func (c *Collector) decodeGen1Status(e *metrics.Emitter, body []byte) error {
 		return err
 	}
 
+	// name resolves a component's configured name for this device, or "".
+	name := func(component, id string) string {
+		return c.componentName(e.Labels().Device, component, id)
+	}
+
 	for i, r := range s.Relays {
-		sw := e.WithComponent("switch", strconv.Itoa(i), "")
+		sw := e.WithComponent("switch", strconv.Itoa(i), name("switch", strconv.Itoa(i)))
 		sw.Bool(metrics.FamilySwitchOn, r.IsOn)
 		if r.Overpower {
 			sw.Value(metrics.FamilyComponentError, 1, "overpower")
@@ -126,7 +131,7 @@ func (c *Collector) decodeGen1Status(e *metrics.Emitter, body []byte) error {
 		if !m.IsValid {
 			continue // an invalid meter means no reading, not a zero reading
 		}
-		sw := e.WithComponent("switch", strconv.Itoa(i), "")
+		sw := e.WithComponent("switch", strconv.Itoa(i), name("switch", strconv.Itoa(i)))
 		sw.Value(metrics.FamilyPower, m.Power)
 		// Gen1 meters[] reports WATT-MINUTES, while emeters[] below reports
 		// watt-hours. Mixing them up is a silent 60x error on every Shelly 1PM.
@@ -139,7 +144,7 @@ func (c *Collector) decodeGen1Status(e *metrics.Emitter, body []byte) error {
 	}
 
 	for i, m := range s.EMeters {
-		em := e.WithComponent("em1", strconv.Itoa(i), "")
+		em := e.WithComponent("em1", strconv.Itoa(i), name("em1", strconv.Itoa(i)))
 		setIf(em, metrics.FamilyPower, m.Power)
 		setIf(em, metrics.FamilyVoltage, m.Voltage)
 		setIf(em, metrics.FamilyCurrent, m.Current)
@@ -154,13 +159,13 @@ func (c *Collector) decodeGen1Status(e *metrics.Emitter, body []byte) error {
 	}
 
 	for i, in := range s.Inputs {
-		input := e.WithComponent("input", strconv.Itoa(i), "")
+		input := e.WithComponent("input", strconv.Itoa(i), name("input", strconv.Itoa(i)))
 		input.Bool(metrics.FamilyInputState, in.Input != 0)
 		input.Value(metrics.FamilyInputCounts, float64(in.EventCnt), "event")
 	}
 
 	for i, l := range s.Lights {
-		light := e.WithComponent("light", strconv.Itoa(i), "")
+		light := e.WithComponent("light", strconv.Itoa(i), name("light", strconv.Itoa(i)))
 		light.Bool(metrics.FamilyLightOn, l.IsOn)
 		if l.Brightness != nil {
 			light.Value(metrics.FamilyLightBrightness, *l.Brightness/100)
@@ -170,7 +175,7 @@ func (c *Collector) decodeGen1Status(e *metrics.Emitter, body []byte) error {
 	// The top-level temperature is the device's internal temperature, which Gen2
 	// reports as switch:0.temperature.tC.
 	if s.Temperature != nil {
-		sw := e.WithComponent("switch", "0", "")
+		sw := e.WithComponent("switch", "0", name("switch", "0"))
 		sw.Value(metrics.FamilyTemperature, *s.Temperature)
 		if s.OverTemperature {
 			sw.Value(metrics.FamilyComponentError, 1, "overtemp")

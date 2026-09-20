@@ -1,0 +1,6 @@
+{
+  "name": "My 1PM",
+  "relays": [{"name": "Water Heater", "ison": true}],
+  "meters": [{"power": 18.4}],
+  "inputs": [{"name": "Wall Switch"}]
+}

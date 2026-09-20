@@ -1,0 +1,7 @@
+{
+  "switch:0": {"id": 0, "name": "Kitchen", "in_mode": "follow"},
+  "input:0": {"id": 0, "name": "Doorbell", "type": "switch"},
+  "sys": {"device": {"name": "shellyplus1pm-a8032ab12345"}},
+  "wifi": {"sta": {"enable": true}},
+  "ble": {"enable": false}
+}

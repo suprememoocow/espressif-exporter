@@ -13,7 +13,6 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -40,8 +39,7 @@ type Collector struct {
 
 	unknownComponents *unknownCounter
 
-	namesMu sync.RWMutex
-	names   map[string]map[string]string // device ID -> "switch:0" -> name
+	names *namesCache
 }
 
 // New builds the collector.
@@ -57,7 +55,7 @@ func New(cfg config.Shelly, families *metrics.Registry, log *slog.Logger) *Colle
 		identities:        newIdentityCache(cfg.IdentityTTL),
 		auth:              newAuthResolver(cfg.Auth, log),
 		unknownComponents: newUnknownCounter(),
-		names:             map[string]map[string]string{},
+		names:             newNamesCache(cfg.IdentityTTL),
 	}
 }
 
@@ -74,9 +72,7 @@ func (c *Collector) IdentityCacheSize() int { return c.identities.len() }
 func (c *Collector) Forget(deviceID string) {
 	c.clients.forget(deviceID)
 	c.identities.forget(deviceID)
-	c.namesMu.Lock()
-	delete(c.names, deviceID)
-	c.namesMu.Unlock()
+	c.names.forget(deviceID)
 }
 
 // Probe collects one device's metrics.
@@ -111,6 +107,12 @@ func (c *Collector) Probe(
 		Gen:      id.Gen,
 	})
 	client := c.clients.get(clientKey{deviceID: dev.ID, epoch: dev.Epoch}, id.Gen, cred)
+
+	// Refresh per-component names on the same cold path as identity; best-effort, so a
+	// failure never fails the probe (see ensureNames).
+	if c.cfg.FetchConfig {
+		c.ensureNames(ctx, client, dev, id.Gen)
+	}
 
 	base := metrics.Labels{Device: dev.ID, Kind: "shelly"}
 	e := metrics.NewEmitter(c.families, base)
@@ -184,16 +186,19 @@ func (c *Collector) fetch(
 	return body, resp.StatusCode, nil
 }
 
-// componentName returns a configured component name, or "".
-func (c *Collector) componentName(component, id string) string {
-	c.namesMu.RLock()
-	defer c.namesMu.RUnlock()
-	for _, byKey := range c.names {
-		if name, ok := byKey[component+":"+id]; ok {
-			return name
-		}
+// componentName returns a device's configured name for a component, or "".
+//
+// The energy-only variants emdata/em1data re-emit under em/em1 (see extractEMData), so their
+// names live under the em/em1 config key: normalising here keeps the energy series' name in
+// step with the power series', which is what preserves the (component,id,phase) join.
+func (c *Collector) componentName(deviceID, component, id string) string {
+	switch component {
+	case "emdata":
+		component = "em"
+	case "em1data":
+		component = "em1"
 	}
-	return ""
+	return c.names.lookup(deviceID, component+":"+id)
 }
 
 // decodeJSON is a small helper for the Gen1 path, which has a fixed schema.

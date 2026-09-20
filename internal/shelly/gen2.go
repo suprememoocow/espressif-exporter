@@ -76,7 +76,8 @@ func (c *Collector) decodeGen2Status(e *metrics.Emitter, body []byte) error {
 
 		switch {
 		case extractors[component] != nil:
-			extractors[component](e.WithComponent(component, id, c.componentName(component, id)), component, id, m)
+			name := c.componentName(e.Labels().Device, component, id)
+			extractors[component](e.WithComponent(component, id, name), component, id, m)
 		case skipComponents[component]:
 		default:
 			c.unknownComponents.inc(component)
