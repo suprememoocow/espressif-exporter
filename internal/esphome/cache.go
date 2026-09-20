@@ -1,6 +1,7 @@
 package esphome
 
 import (
+	"net/netip"
 	"sync"
 	"time"
 
@@ -34,12 +35,16 @@ type stateRecord struct {
 
 // snapshot is an immutable view of a device, served to probes without locking.
 type snapshot struct {
-	Connected        bool
-	ConnectedSince   time.Time
-	LastMessageAt    time.Time
-	PingSeconds      float64
-	Info             *pb.DeviceInfoResponse
-	Transport        string
+	Connected      bool
+	ConnectedSince time.Time
+	LastMessageAt  time.Time
+	PingSeconds    float64
+	Info           *pb.DeviceInfoResponse
+	Transport      string
+	// Addr is the address the live connection was dialled on, which is not necessarily
+	// the registry's current preference: the manager rebuilds the device on an epoch
+	// change, so the two converge a moment later rather than immediately.
+	Addr             netip.Addr
 	Entities         map[uint32]*entityRecord
 	States           map[uint32]stateRecord
 	EntityGeneration uint64

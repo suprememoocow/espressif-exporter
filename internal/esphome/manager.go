@@ -171,7 +171,11 @@ func (m *Manager) snapshotOf(id string) (snapshot, bool) {
 	if !ok {
 		return snapshot{}, false
 	}
-	return managed.dev.cache.Snapshot(), true
+	// dev.addr is written once in newDevice and never mutated: an address change
+	// arrives as an epoch change, which rebuilds the device rather than editing it.
+	snap := managed.dev.cache.Snapshot()
+	snap.Addr = managed.dev.addr
+	return snap, true
 }
 
 // Connected reports how many devices currently hold a live connection.
