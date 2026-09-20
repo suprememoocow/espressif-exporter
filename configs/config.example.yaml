@@ -84,6 +84,10 @@ shelly:
       - match: {hostname: "shelly1-*"}
         password_file: /run/secrets/shelly_legacy_password
   generic_fallback: true
+  # Fetch each device's per-component names (Shelly.GetConfig on Gen2+, /settings on Gen1)
+  # so series carry a `name` label. Refreshed on the identity_ttl timer, off the scrape
+  # path. Set to false to skip the extra request.
+  fetch_config: true
 
 esphome:
   encryption_key_file: /run/secrets/esphome_psk

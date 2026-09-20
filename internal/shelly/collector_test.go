@@ -22,6 +22,7 @@ import (
 type fakeDevice struct {
 	shelly   string
 	status   string
+	config   string
 	requests map[string]int
 }
 
@@ -37,6 +38,8 @@ func newFakeDevice(t *testing.T, shellyBody, statusBody string) (*fakeDevice, re
 			_, _ = w.Write([]byte(d.shelly))
 		case "/rpc/Shelly.GetStatus", "/status":
 			_, _ = w.Write([]byte(d.status))
+		case "/rpc/Shelly.GetConfig", "/settings":
+			_, _ = w.Write([]byte(d.config))
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -72,6 +75,7 @@ const gen2ShellyBody = `{"name":"Lamp","id":"shellyplus1pm-a8032ab12345","mac":"
 func TestProbeEndToEnd(t *testing.T) {
 	status := string(fixture(t, "gen2_plus1pm.json"))
 	fake, dev := newFakeDevice(t, gen2ShellyBody, status)
+	fake.config = string(fixture(t, "gen2_config.json"))
 
 	c := New(config.Default().Shelly, metrics.NewRegistry(), discardLogger())
 	out, res := c.Probe(context.Background(), dev)
@@ -89,6 +93,11 @@ func TestProbeEndToEnd(t *testing.T) {
 		}
 	}
 
+	// The configured component name reaches the emitted series.
+	if !hasLabel(out, "espressif_switch_on", "name", "Kitchen") {
+		t.Errorf("switch:0 should carry name=Kitchen from GetConfig; got %v", labelDump(out, "espressif_switch_on"))
+	}
+
 	// Steady state must be one status request per scrape, with identity served from
 	// cache. Anything more multiplies load across a hundred-device fleet.
 	for range 5 {
@@ -101,6 +110,10 @@ func TestProbeEndToEnd(t *testing.T) {
 	}
 	if n := fake.requests["/rpc/Shelly.GetStatus"]; n != 6 {
 		t.Errorf("status requested %d times across 6 probes, want 6", n)
+	}
+	// GetConfig is on the cold path only, so it is fetched once and cached for the TTL.
+	if n := fake.requests["/rpc/Shelly.GetConfig"]; n != 1 {
+		t.Errorf("GetConfig requested %d times across 6 probes, want 1 (names cached for 6h)", n)
 	}
 }
 
@@ -129,6 +142,7 @@ func TestProbeDetectsGen1AndUsesLegacyEndpoint(t *testing.T) {
 	const gen1Shelly = `{"type":"SHSW-PM","mac":"A8032AB12345","auth":false,
 	 "fw":"20230913-112003/v1.14.0-gcb84623","num_outputs":1}`
 	fake, dev := newFakeDevice(t, gen1Shelly, string(fixture(t, "gen1_1pm.json")))
+	fake.config = string(fixture(t, "gen1_settings.json"))
 
 	c := New(config.Default().Shelly, metrics.NewRegistry(), discardLogger())
 	out, res := c.Probe(context.Background(), dev)
@@ -142,8 +156,15 @@ func TestProbeDetectsGen1AndUsesLegacyEndpoint(t *testing.T) {
 	if fake.requests["/rpc/Shelly.GetStatus"] != 0 {
 		t.Error("Gen1 must not be asked for the Gen2 RPC endpoint")
 	}
+	// Gen1 names come from /settings, not Shelly.GetConfig.
+	if fake.requests["/settings"] != 1 {
+		t.Errorf("Gen1 names should be fetched from /settings, got requests %v", fake.requests)
+	}
 	if !contains(names(out), "espressif_switch_on") {
 		t.Error("expected switch state from the Gen1 fixture")
+	}
+	if !hasLabel(out, "espressif_switch_on", "name", "Water Heater") {
+		t.Errorf("switch:0 should carry name=Water Heater from /settings; got %v", labelDump(out, "espressif_switch_on"))
 	}
 }
 
@@ -170,6 +191,43 @@ func TestProbeCancellationIsATimeout(t *testing.T) {
 	if res.Reason != probe.ReasonTimeout {
 		t.Errorf("reason = %q, want timeout", res.Reason)
 	}
+}
+
+// hasLabel reports whether any sample of a family carries label=value.
+func hasLabel(metricsOut []prometheus.Metric, family, label, value string) bool {
+	reg := prometheus.NewRegistry()
+	reg.MustRegister(collected{metricsOut})
+	mfs, _ := reg.Gather()
+	for _, mf := range mfs {
+		if mf.GetName() != family {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			for _, l := range m.GetLabel() {
+				if l.GetName() == label && l.GetValue() == value {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// labelDump renders a family's samples for failure messages.
+func labelDump(metricsOut []prometheus.Metric, family string) []string {
+	reg := prometheus.NewRegistry()
+	reg.MustRegister(collected{metricsOut})
+	mfs, _ := reg.Gather()
+	var out []string
+	for _, mf := range mfs {
+		if mf.GetName() != family {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			out = append(out, m.String())
+		}
+	}
+	return out
 }
 
 func contains(haystack []string, needle string) bool {
