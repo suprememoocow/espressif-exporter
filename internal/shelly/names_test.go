@@ -10,13 +10,26 @@ import (
 )
 
 func TestDecodeGen2Config(t *testing.T) {
-	names, err := decodeGen2Config(fixture(t, "gen2_config.json"))
+	got, err := decodeGen2Config(fixture(t, "gen2_config.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := map[string]string{"switch:0": "Kitchen", "input:0": "Doorbell"}
-	if !reflect.DeepEqual(names, want) {
-		t.Errorf("names = %v, want %v", names, want)
+	if !reflect.DeepEqual(got.components, want) {
+		t.Errorf("components = %v, want %v", got.components, want)
+	}
+}
+
+// Gen2+ report the device name on /shelly, which identity reads unauthenticated, so taking it
+// from sys.device.name here as well would make the label depend on fetch_config. Worse, the
+// fixture shows what sys.device.name holds for a device nobody has named: the device id.
+func TestDecodeGen2ConfigLeavesTheDeviceNameEmpty(t *testing.T) {
+	got, err := decodeGen2Config(fixture(t, "gen2_config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.device != "" {
+		t.Errorf("device = %q, want empty", got.device)
 	}
 }
 
@@ -26,24 +39,57 @@ func TestDecodeGen2ConfigDropsNullAndEmptyNames(t *testing.T) {
 	body := []byte(`{"switch:0":{"name":"Boiler"},"switch:1":{"name":null},
 	                 "switch:2":{"name":""},"switch:3":{},
 	                 "sys":{"device":{"name":"x"}},"scalar":5,"list":[1,2]}`)
-	names, err := decodeGen2Config(body)
+	got, err := decodeGen2Config(body)
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := map[string]string{"switch:0": "Boiler"}
-	if !reflect.DeepEqual(names, want) {
-		t.Errorf("names = %v, want %v", names, want)
+	if !reflect.DeepEqual(got.components, want) {
+		t.Errorf("components = %v, want %v", got.components, want)
 	}
 }
 
 func TestDecodeGen1Settings(t *testing.T) {
-	names, err := decodeGen1Settings(fixture(t, "gen1_settings.json"))
+	got, err := decodeGen1Settings(fixture(t, "gen1_settings.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := map[string]string{"switch:0": "Water Heater", "input:0": "Wall Switch"}
-	if !reflect.DeepEqual(names, want) {
-		t.Errorf("names = %v, want %v", names, want)
+	if !reflect.DeepEqual(got.components, want) {
+		t.Errorf("components = %v, want %v", got.components, want)
+	}
+	// Gen1's /shelly has no name field, so this document is the only place the name an
+	// operator set in the app exists.
+	if got.device != "My 1PM" {
+		t.Errorf("device = %q, want \"My 1PM\"", got.device)
+	}
+}
+
+// An absent, empty or null name must stay empty so Probe keeps the mDNS fallback rather than
+// exporting a blank device_name.
+func TestDecodeGen1SettingsWithoutADeviceName(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{"absent", `{"relays":[{"name":"Water Heater"}]}`},
+		{"empty", `{"name":"","relays":[{"name":"Water Heater"}]}`},
+		{"null", `{"name":null,"relays":[{"name":"Water Heater"}]}`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := decodeGen1Settings([]byte(tt.body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.device != "" {
+				t.Errorf("device = %q, want empty", got.device)
+			}
+			if got.components["switch:0"] != "Water Heater" {
+				t.Errorf("components = %v, want the relay name preserved", got.components)
+			}
+		})
 	}
 }
 
@@ -52,7 +98,8 @@ func TestDecodeGen1Settings(t *testing.T) {
 // pairs energy with power is not broken by a mismatched name label.
 func TestGen2NameReachesSeriesAndEnergyMatchesPower(t *testing.T) {
 	c, reg := testCollector(t)
-	c.names.put("mac:aabbccddeeff", 0, c.clock(), map[string]string{"em:0": "Main Panel"})
+	c.names.put("mac:aabbccddeeff", 0, c.clock(),
+		deviceNames{components: map[string]string{"em:0": "Main Panel"}})
 
 	e := emitterFor(reg, "mac:aabbccddeeff")
 	if err := c.decodeGen2Status(e, fixture(t, "gen2_em3.json")); err != nil {
@@ -69,7 +116,8 @@ func TestGen2NameReachesSeriesAndEnergyMatchesPower(t *testing.T) {
 
 func TestGen1NameReachesSeries(t *testing.T) {
 	c, reg := testCollector(t)
-	c.names.put("mac:a8032ab1c2d4", 0, c.clock(), map[string]string{"switch:0": "Water Heater"})
+	c.names.put("mac:a8032ab1c2d4", 0, c.clock(),
+		deviceNames{components: map[string]string{"switch:0": "Water Heater"}})
 
 	e := emitterFor(reg, "mac:a8032ab1c2d4")
 	if err := c.decodeGen1Status(e, fixture(t, "gen1_1pm.json")); err != nil {

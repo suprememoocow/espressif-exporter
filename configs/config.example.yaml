@@ -85,8 +85,9 @@ shelly:
         password_file: /run/secrets/shelly_legacy_password
   generic_fallback: true
   # Fetch each device's per-component names (Shelly.GetConfig on Gen2+, /settings on Gen1)
-  # so series carry a `name` label. Refreshed on the identity_ttl timer, off the scrape
-  # path. Set to false to skip the extra request.
+  # so series carry a `name` label, and on Gen1 the device name itself, which /shelly does
+  # not report. Refreshed on the identity_ttl timer, off the scrape path. Set to false to
+  # skip the extra request; a Gen1 device_name then falls back to the mDNS hostname.
   fetch_config: true
 
 esphome:

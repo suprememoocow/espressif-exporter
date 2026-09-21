@@ -11,7 +11,18 @@ import (
 	"github.com/suprememoocow/espressif-exporter/internal/registry"
 )
 
-// namesCache holds one device's per-component names, keyed "switch:0" -> name.
+// deviceNames is everything the exporter labels with from a device's own configuration: the
+// device's name and one name per component.
+//
+// The device name rides along here rather than on Identity because Gen1's /shelly — the only
+// unauthenticated endpoint, and so the only one identity can rely on — does not report it. It
+// arrives on the same document as the component names, on the same timer.
+type deviceNames struct {
+	device     string            // configured device name; "" when the device has none
+	components map[string]string // "switch:0" -> "Water Heater"
+}
+
+// namesCache holds one device's configured names: its own, and one per component.
 //
 // It mirrors identityCache deliberately: names are refreshed on the same six-hour timer,
 // and both an epoch change (a DHCP reassignment) and TTL expiry must invalidate the entry.
@@ -24,7 +35,7 @@ type namesCache struct {
 }
 
 type namesEntry struct {
-	names     map[string]string
+	names     deviceNames
 	fetchedAt time.Time
 	epoch     uint64
 }
@@ -33,18 +44,18 @@ func newNamesCache(ttl time.Duration) *namesCache {
 	return &namesCache{ttl: ttl, m: map[string]namesEntry{}}
 }
 
-func (c *namesCache) get(deviceID string, epoch uint64, now time.Time) (map[string]string, bool) {
+func (c *namesCache) get(deviceID string, epoch uint64, now time.Time) (deviceNames, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	e, ok := c.m[deviceID]
 	if !ok || e.epoch != epoch || now.Sub(e.fetchedAt) > c.ttl {
-		return nil, false
+		return deviceNames{}, false
 	}
 	return e.names, true
 }
 
-func (c *namesCache) put(deviceID string, epoch uint64, now time.Time, names map[string]string) {
+func (c *namesCache) put(deviceID string, epoch uint64, now time.Time, names deviceNames) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.m[deviceID] = namesEntry{names: names, fetchedAt: now, epoch: epoch}
@@ -60,44 +71,54 @@ func (c *namesCache) forget(deviceID string) {
 func (c *namesCache) lookup(deviceID, key string) string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.m[deviceID].names[key]
+	return c.m[deviceID].names.components[key]
 }
 
-// ensureNames refreshes a device's component names when the cache is cold.
+// ensureNames refreshes a device's configured names when the cache is cold, and returns them
+// either way.
 //
 // It runs only on the cold path, so steady state stays at one status request per scrape.
 // Names are cosmetic, so a failure never fails the probe: it is logged and an empty map is
 // cached, which bounds the request rate to one attempt per TTL. That is the opposite of
 // identityCache, which does not cache failures — but identity has probe backoff protecting
 // its hot path, and names do not.
-func (c *Collector) ensureNames(ctx context.Context, client *http.Client, dev registry.Device, gen int) {
+//
+// Returning the cached value on the warm path is load-bearing, not a convenience. The identity
+// and names caches share a TTL but are written at different instants within a probe, so
+// identity expires marginally first. Were the caller to depend on this call having just
+// fetched, an identity refresh would reset the device name to the mDNS fallback while this
+// returned early, pinning the wrong name for a further six hours.
+func (c *Collector) ensureNames(
+	ctx context.Context, client *http.Client, dev registry.Device, gen int,
+) deviceNames {
 	now := c.clock()
-	if _, ok := c.names.get(dev.ID, dev.Epoch, now); ok {
-		return
+	if names, ok := c.names.get(dev.ID, dev.Epoch, now); ok {
+		return names
 	}
 
 	names, err := c.fetchNames(ctx, client, dev, gen)
 	if err != nil {
-		c.log.Debug("fetching component names failed", "device", dev.ID, "error", err)
-		names = map[string]string{}
+		c.log.Debug("fetching device configuration failed", "device", dev.ID, "error", err)
+		names = deviceNames{components: map[string]string{}}
 	}
 	c.names.put(dev.ID, dev.Epoch, now, names)
+	return names
 }
 
-// fetchNames retrieves the per-component names for a generation.
+// fetchNames retrieves the configured names for a generation.
 func (c *Collector) fetchNames(
 	ctx context.Context, client *http.Client, dev registry.Device, gen int,
-) (map[string]string, error) {
+) (deviceNames, error) {
 	if gen >= 2 {
 		body, _, err := c.fetch(ctx, client, dev, "/rpc/Shelly.GetConfig")
 		if err != nil {
-			return nil, err
+			return deviceNames{}, err
 		}
 		return decodeGen2Config(body)
 	}
 	body, _, err := c.fetch(ctx, client, dev, "/settings")
 	if err != nil {
-		return nil, err
+		return deviceNames{}, err
 	}
 	return decodeGen1Settings(body)
 }
@@ -106,10 +127,16 @@ func (c *Collector) fetchNames(
 //
 // The document is component-keyed exactly like Shelly.GetStatus, so it is walked the same
 // shape-tolerant way, and the keys ("switch:0", "em1:0") already match the status keys.
-func decodeGen2Config(body []byte) (map[string]string, error) {
+//
+// The device name is deliberately not taken from sys.device.name: Gen2+ report it on /shelly,
+// which identity already reads unauthenticated, so sourcing it here as well would make the
+// label depend on whether fetch_config is on. Worse, sys.device.name holds the device id for a
+// device nobody has named, so an unnamed Gen2 would export "shellyplus1pm-a8032ab12345" in
+// place of the mDNS fallback.
+func decodeGen2Config(body []byte) (deviceNames, error) {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(body, &raw); err != nil {
-		return nil, err
+		return deviceNames{}, err
 	}
 
 	names := map[string]string{}
@@ -124,16 +151,20 @@ func decodeGen2Config(body []byte) (map[string]string, error) {
 			names[key] = *cfg.Name
 		}
 	}
-	return names, nil
+	return deviceNames{components: names}, nil
 }
 
-// decodeGen1Settings pulls per-channel names out of GET /settings.
+// decodeGen1Settings pulls the device name and the per-channel names out of GET /settings.
 //
-// The names are mapped onto the same component keys decodeGen1Status emits, so a lookup by
-// "switch:0" works identically across generations. Gen1 meters[] have no name; the switch
+// The channel names are mapped onto the same component keys decodeGen1Status emits, so a lookup
+// by "switch:0" works identically across generations. Gen1 meters[] have no name; the switch
 // name comes from relays[].
-func decodeGen1Settings(body []byte) (map[string]string, error) {
+//
+// The top-level name is the device name an operator set in the app. Gen1's /shelly omits it
+// entirely, so this document is the only place it exists.
+func decodeGen1Settings(body []byte) (deviceNames, error) {
 	var s struct {
+		Name   string `json:"name"`
 		Relays []struct {
 			Name string `json:"name"`
 		} `json:"relays"`
@@ -148,7 +179,7 @@ func decodeGen1Settings(body []byte) (map[string]string, error) {
 		} `json:"lights"`
 	}
 	if err := decodeJSON(body, &s); err != nil {
-		return nil, err
+		return deviceNames{}, err
 	}
 
 	names := map[string]string{}
@@ -169,5 +200,5 @@ func decodeGen1Settings(body []byte) (map[string]string, error) {
 	for i, l := range s.Lights {
 		add("light", i, l.Name)
 	}
-	return names, nil
+	return deviceNames{device: s.Name, components: names}, nil
 }

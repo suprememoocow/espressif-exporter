@@ -336,13 +336,19 @@ Treat `espressif_raw_*` names as unstable. `espressif_exporter_shelly_unknown_co
 counts each unknown type, which tells you when a component needs a curated extractor. Set
 `shelly.generic_fallback: false` to disable the fallback.
 
-### Shelly component names
+### Shelly names
 
 Each Shelly series carries a `name` label taken from the device's own configuration — the
-per-channel name you set in the app, such as a switch named "Water Heater". The exporter
+per-component name you set in the app, such as a switch named "Water Heater". The exporter
 reads it from `Shelly.GetConfig` on Gen2+ and `/settings` on Gen1, refreshed on the
 `shelly.identity_ttl` timer rather than on every scrape. Set `shelly.fetch_config: false`
 to skip the request; series then carry an empty `name`.
+
+The `device_name` label on `espressif_device_info` comes from the same request on Gen1.
+Gen1 firmware omits the name from `/shelly`, so `/settings` is the only endpoint that
+reports it. With `shelly.fetch_config: false`, a Gen1 device falls back to its mDNS
+hostname, such as `shelly1-c45bbe7891bf`. Gen2+ report the name on `/shelly` and are
+unaffected.
 
 ## Terminology
 
