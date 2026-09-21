@@ -108,10 +108,19 @@ func (c *Collector) Probe(
 	})
 	client := c.clients.get(clientKey{deviceID: dev.ID, epoch: dev.Epoch}, id.Gen, cred)
 
-	// Refresh per-component names on the same cold path as identity; best-effort, so a
+	// Refresh the configured names on the same cold path as identity; best-effort, so a
 	// failure never fails the probe (see ensureNames).
 	if c.cfg.FetchConfig {
-		c.ensureNames(ctx, client, dev, id.Gen)
+		names := c.ensureNames(ctx, client, dev, id.Gen)
+		// Gen1's /shelly carries no name, so the name an operator set in the app lives only
+		// on /settings. Apply it to this probe's copy of the identity rather than to the
+		// cached one: the two caches expire moments apart, so a cached override would be
+		// lost on the next identity refresh and not restored until the names entry expired
+		// too — six more hours of the wrong name. An empty name leaves the mDNS fallback
+		// fetchIdentity already applied, which is also what every Gen2 device takes.
+		if names.device != "" {
+			id.Name = names.device
+		}
 	}
 
 	base := metrics.Labels{Device: dev.ID, Kind: "shelly"}
