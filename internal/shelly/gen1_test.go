@@ -122,3 +122,56 @@ func labelSets(t *testing.T, e *metrics.Emitter, families []string) map[string][
 	}
 	return out
 }
+
+// tmp is the internal temperature on a device with outputs and the ambient one on a
+// sensor. Treating it as ambient everywhere duplicated the 1PM's internal temperature as
+// temperature:0 and left a dimmer's off its light.
+func TestGen1TmpIsInternalOnDevicesWithOutputs(t *testing.T) {
+	for _, tc := range []struct {
+		desc string
+		body string
+		want []string
+		none string
+	}{
+		{
+			desc: "1PM reports it twice: one series, on the switch",
+			body: `{"relays":[{"ison":true}],"temperature":44.6,"tmp":{"tC":44.6,"is_valid":true}}`,
+			want: []string{`espressif_temperature_celsius{component=switch,device=mac:aa,device_class=temperature,id=0,kind=shelly} 44.6`},
+			none: "component=temperature",
+		},
+		{
+			desc: "dimmer reports only tmp: on the light",
+			body: `{"lights":[{"ison":true,"brightness":40}],"tmp":{"tC":52.2,"is_valid":true}}`,
+			want: []string{`espressif_temperature_celsius{component=light,device=mac:aa,device_class=temperature,id=0,kind=shelly} 52.2`},
+			none: "component=temperature",
+		},
+		{
+			desc: "H&T has no outputs: ambient temperature:0",
+			body: `{"tmp":{"tC":21.5,"is_valid":true},"hum":{"value":48,"is_valid":true}}`,
+			want: []string{`espressif_temperature_celsius{component=temperature,device=mac:aa,device_class=temperature,id=0,kind=shelly} 21.5`},
+			none: "component=switch",
+		},
+	} {
+		t.Run(tc.desc, func(t *testing.T) {
+			c, reg := testCollector(t)
+			e := emitterFor(reg, "mac:aa")
+			if err := c.decodeGen1Status(e, []byte(tc.body)); err != nil {
+				t.Fatal(err)
+			}
+			got := series(t, e)
+			want(t, got, tc.want...)
+			n := 0
+			for _, line := range got {
+				if strings.HasPrefix(line, "espressif_temperature_celsius") {
+					n++
+					if strings.Contains(line, tc.none) {
+						t.Errorf("unexpected series: %s", line)
+					}
+				}
+			}
+			if n != 1 {
+				t.Errorf("got %d temperature series, want 1: %v", n, got)
+			}
+		})
+	}
+}
