@@ -39,6 +39,9 @@ type Self struct {
 
 	ShellyUnknownComponents *prometheus.CounterVec
 	ShellyIdentityCache     prometheus.Gauge
+
+	ShellyCloudNamesUp          prometheus.Gauge
+	ShellyCloudNamesLastSuccess prometheus.Gauge
 }
 
 // NewSelf builds the exporter's registry. It deliberately does not use
@@ -105,6 +108,12 @@ func NewSelf(buildVersion, commit, goVersion string) *Self {
 			"it is the signal that a component should be promoted out of the raw namespace.",
 		"component")
 	s.ShellyIdentityCache = gauge("shelly_identity_cache_entries", "Cached Shelly identities.")
+	s.ShellyCloudNamesUp = gauge("shelly_cloud_names_up",
+		"Whether the last refresh of names from Shelly Cloud succeeded. When it fails the "+
+			"previous names stay in use, so this going to 0 does not change any series.")
+	s.ShellyCloudNamesLastSuccess = gauge("shelly_cloud_names_last_success_timestamp_seconds",
+		"When names were last refreshed from Shelly Cloud. Alert on this: a revoked key "+
+			"leaves names silently frozen.")
 
 	reg.MustRegister(
 		collectors.NewGoCollector(),
@@ -115,6 +124,7 @@ func NewSelf(buildVersion, commit, goVersion string) *Self {
 		s.Probes, s.ProbeErrors, s.ProbeDuration, s.ProbesInFlight, s.ProbesSkipped,
 		s.ProbesShared, s.DevicesBackoff,
 		s.ShellyUnknownComponents, s.ShellyIdentityCache,
+		s.ShellyCloudNamesUp, s.ShellyCloudNamesLastSuccess,
 	)
 
 	buildInfo := prometheus.NewGaugeVec(prometheus.GaugeOpts{

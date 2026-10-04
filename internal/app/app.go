@@ -16,6 +16,7 @@ import (
 	"github.com/suprememoocow/espressif-exporter/internal/discovery"
 	"github.com/suprememoocow/espressif-exporter/internal/discovery/avahi"
 	"github.com/suprememoocow/espressif-exporter/internal/discovery/multi"
+	cloudsource "github.com/suprememoocow/espressif-exporter/internal/discovery/shellycloud"
 	"github.com/suprememoocow/espressif-exporter/internal/discovery/static"
 	"github.com/suprememoocow/espressif-exporter/internal/discovery/zeroconf"
 	"github.com/suprememoocow/espressif-exporter/internal/esphome"
@@ -24,6 +25,7 @@ import (
 	"github.com/suprememoocow/espressif-exporter/internal/registry"
 	"github.com/suprememoocow/espressif-exporter/internal/server"
 	"github.com/suprememoocow/espressif-exporter/internal/shelly"
+	"github.com/suprememoocow/espressif-exporter/internal/shellycloud"
 	"github.com/suprememoocow/espressif-exporter/internal/version"
 )
 
@@ -42,6 +44,11 @@ type App struct {
 	esphomeMgr *esphome.Manager
 	esphome    *esphome.Collector
 	avahi      *avahi.Discoverer
+
+	// cloud is shared by the shelly_cloud discovery backend and the name store, so the
+	// two stay within the account's rate limit together. Nil when neither is enabled.
+	cloud      *shellycloud.Client
+	cloudNames *shellycloud.NameStore
 
 	// Baselines for counters that are sampled rather than incremented in place.
 	lastUnknown map[string]uint64
@@ -78,6 +85,15 @@ func New(cfg config.Config, log *slog.Logger) (*App, error) {
 		esphomeMgr:  esphome.NewManager(cfg.ESPHome, reg, log),
 		lastUnknown: map[string]uint64{},
 		lastSkipped: map[string]uint64{},
+	}
+
+	if cfg.Shelly.Cloud.Names {
+		client, err := a.cloudClient()
+		if err != nil {
+			return nil, err
+		}
+		a.cloudNames = shellycloud.NewNameStore(client, cfg.Shelly.Cloud.RefreshInterval, log)
+		a.shelly.SetCloudNames(a.cloudNames)
 	}
 
 	backends, err := a.buildBackends()
@@ -131,6 +147,14 @@ func (a *App) buildBackends() ([]discovery.Discoverer, error) {
 		case zeroconf.Name:
 			backends = append(backends, zeroconf.New(a.cfg.Discovery.ServiceTypes, a.log))
 
+		case cloudsource.Name:
+			client, err := a.cloudClient()
+			if err != nil {
+				return nil, err
+			}
+			sc := a.cfg.Discovery.ShellyCloud
+			backends = append(backends, cloudsource.New(client, sc.Interval, sc.IncludeOffline, a.log))
+
 		case avahi.Name:
 			a.avahi = avahi.New(a.cfg.Discovery.Avahi, a.cfg.Discovery.ServiceTypes, a.log)
 			backends = append(backends, a.avahi)
@@ -150,6 +174,20 @@ func (a *App) buildBackends() ([]discovery.Discoverer, error) {
 		a.cfg.Discovery.Avahi.Required = false
 	}
 	return backends, nil
+}
+
+// cloudClient returns the one Shelly Cloud client, building it on first use.
+func (a *App) cloudClient() (*shellycloud.Client, error) {
+	if a.cloud != nil {
+		return a.cloud, nil
+	}
+	c := a.cfg.Shelly.Cloud
+	client, err := shellycloud.NewClient(c.Server, c.AuthKey.Reveal(), c.Timeout)
+	if err != nil {
+		return nil, fmt.Errorf("shelly cloud: %w", err)
+	}
+	a.cloud = client
+	return client, nil
 }
 
 // ready reports readiness. Liveness deliberately does not depend on discovery; see
@@ -178,11 +216,40 @@ func (a *App) ready() (bool, string) {
 func (a *App) Run(ctx context.Context) error {
 	g, ctx := errgroup.WithContext(ctx)
 	g.Go(func() error { return a.registry.Run(ctx) })
-	g.Go(func() error { return a.discovery.Run(ctx, a.registry.Events()) })
+	g.Go(func() error {
+		a.awaitCloudNames(ctx)
+		return a.discovery.Run(ctx, a.registry.Events())
+	})
 	g.Go(func() error { return a.server.Run(ctx) })
 	g.Go(func() error { return a.esphomeMgr.Run(ctx) })
+	if a.cloudNames != nil {
+		g.Go(func() error { return a.cloudNames.Run(ctx) })
+	}
 	g.Go(func() error { a.refreshSelfMetrics(ctx); return nil })
 	return g.Wait()
+}
+
+// cloudNamesStartupWait caps how long discovery is held back for the first names refresh.
+const cloudNamesStartupWait = 30 * time.Second
+
+// awaitCloudNames holds discovery back until the first names refresh has finished. A
+// device that is scraped before then carries its own names, and then the cloud's moments
+// later, which creates a short-lived duplicate of every series on every restart. A
+// refresh that is slow or failing costs at most a short delay to discovery, never
+// discovery itself.
+func (a *App) awaitCloudNames(ctx context.Context) {
+	if a.cloudNames == nil {
+		return
+	}
+	t := time.NewTimer(cloudNamesStartupWait)
+	defer t.Stop()
+	select {
+	case <-a.cloudNames.Loaded():
+	case <-t.C:
+		a.log.Warn("starting discovery before the first Shelly Cloud names refresh finished",
+			"waited", cloudNamesStartupWait)
+	case <-ctx.Done():
+	}
 }
 
 // addDelta advances a counter vector by the change since the previous sample, and
@@ -250,6 +317,18 @@ func (a *App) refreshSelfMetrics(ctx context.Context) {
 			}
 			a.self.AvahiUp.Set(up)
 			a.self.AvahiResolvers.Set(float64(a.avahi.ActiveResolvers()))
+		}
+
+		if a.cloudNames != nil {
+			ok, last := a.cloudNames.Health()
+			up := 0.0
+			if ok {
+				up = 1
+			}
+			a.self.ShellyCloudNamesUp.Set(up)
+			if !last.IsZero() {
+				a.self.ShellyCloudNamesLastSuccess.Set(float64(last.Unix()))
+			}
 		}
 
 		a.self.ProbesInFlight.Set(float64(a.limiter.InFlight()))

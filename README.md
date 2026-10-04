@@ -37,13 +37,14 @@ The exporter solves both problems the same way: it browses through the host's
 `avahi-daemon` over the system D-Bus socket. It never binds port 5353. Only discovery
 needs the host. Unicast HTTP and TCP to the devices work from the bridge network.
 
-Three discovery backends implement one interface. Select them with `discovery.sources`.
+Four discovery backends implement one interface. Select them with `discovery.sources`.
 
 | Backend | Use it when | Limits |
 |---------|-------------|--------|
 | `avahi` | Production on TrueNAS SCALE, or any host that runs `avahi-daemon`. | Needs the host D-Bus socket. |
 | `zeroconf` | A Linux host with `network_mode: host` and no `avahi-daemon`. | Binds port 5353. Finds nothing on TrueNAS SCALE or macOS, because another daemon already holds that port. |
 | `static` | VLANs that do not forward mDNS, and as a fallback when Avahi is down. | You maintain the list. |
+| `shelly_cloud` | Shelly devices on VLANs that do not forward mDNS, without maintaining a list. | Shelly only. Needs outbound HTTPS and a cloud key. Addresses are the last ones the devices reported to the cloud, polled every 5 minutes. Devices the cloud lists as offline are included, because Gen1 devices often drop their cloud connection while still reachable on the LAN. See [Shelly Cloud](#shelly-cloud). |
 
 Configure `static` alongside `avahi`. An Avahi outage then reduces coverage instead of
 removing it. Put every device you alert on in the static list.
@@ -238,6 +239,61 @@ shelly:
 Match on `device_id`, `mac`, `hostname`, or `gen`. Gen2 and later accept only the
 username `admin`, so the exporter overrides any other value and logs a warning once.
 
+### Shelly Cloud
+
+One Shelly Cloud account key enables two independent features:
+
+- the `shelly_cloud` discovery backend, which lists every device on the account with its
+  LAN address
+- `shelly.cloud.names`, which takes device names, channel names and rooms from the Shelly
+  app
+
+You can enable either without the other. For example, keep `avahi` for discovery and take
+only the names from the cloud.
+
+```yaml
+shelly:
+  cloud:
+    server: https://shelly-58-eu.shelly.cloud
+    auth_key_file: /run/secrets/shelly_cloud_key
+    names: true
+discovery:
+  sources: [avahi, static, shelly_cloud]
+```
+
+In the Shelly app, open User settings → Authorization cloud key. Copy the key, and the
+server shown with it, into the config.
+
+The key grants control of every device on the account, not just read access. Mount it as a
+file, as above, rather than putting it in a compose file.
+
+The key changes whenever you change the account password, and Shelly may move the account
+to a different server. Either change stops discovery and freezes names. Alert on
+`espressif_exporter_discovery_source_up{source="shelly_cloud"}` and
+`espressif_exporter_shelly_cloud_names_last_success_timestamp_seconds` to catch it.
+
+The cloud limits each account to one request per second, and it counts a request that
+overlaps another against that limit. The exporter therefore sends one request at a time,
+with a two-second pause after each. In steady state it makes one request every 5 minutes
+for discovery and two every 15 minutes for names.
+
+The Shelly app and other integrations on the same account share the limit. When the cloud
+refuses a request with `max_req`, the exporter waits 10 seconds and tries again, up to
+twice. If the room list fails, only the `area` label is affected, and the previous room
+names stay in use. If a names refresh fails, the exporter retries it after 30 seconds,
+doubling the delay up to `refresh_interval`.
+
+At startup the exporter waits up to 30 seconds for the first names refresh before it
+starts discovery, so that no device is scraped under its own names first.
+
+The device-list and room-list endpoints that names depend on are the ones the Shelly app
+itself uses. Shelly does not document them. If names don't appear, capture the response
+and compare it with `internal/shellycloud/testdata/device_list.json`:
+
+```bash
+curl -s -d "auth_key=$KEY" https://shelly-58-eu.shelly.cloud/interface/device/list | jq .
+```
+
 ## Metrics
 
 Both vendors write to one namespace with one label set, so one query covers the fleet:
@@ -260,7 +316,7 @@ Prometheus treats as absent when matching.
 | `name` | Entity name. | Component name. |
 | `device_class` | From the entity metadata. | Derived from the metric family. |
 | `phase` | Empty. | `a`, `b`, `c`, `n`, or `total` on polyphase meters. |
-| `area` | From the device metadata. | Empty. |
+| `area` | From the device metadata. | The device's room in the Shelly app, with [`shelly.cloud.names`](#shelly-cloud). Otherwise empty. |
 
 ### Units
 
@@ -349,6 +405,36 @@ Gen1 firmware omits the name from `/shelly`, so `/settings` is the only endpoint
 reports it. With `shelly.fetch_config: false`, a Gen1 device falls back to its mDNS
 hostname, such as `shelly1-c45bbe7891bf`. Gen2+ report the name on `/shelly` and are
 unaffected.
+
+With `shelly.cloud.names: true`, names from the Shelly app take precedence. The device
+falls back to its own name wherever the app has none. The order is cloud, then device,
+then mDNS:
+
+- **Device name.** A single-channel device takes its name from the app. A multi-channel
+  device keeps its own name, because the app names each channel separately and has no name
+  for the device as a whole.
+- **Channel names.** Each channel in the app has a category, and channel *n* names
+  component *n* of the matching type. The name covers every series that component emits,
+  including power, energy, voltage and current, not just its on/off state.
+
+  | Category | Components |
+  |----------|------------|
+  | `relay` | `switch` |
+  | `roller`, `cover` | `cover` |
+  | `light` | `light`, `rgb`, `rgbw`, `cct` |
+  | `emeter` | `em1`, `pm1` |
+
+  On a Shelly EM or Pro EM-50, the channels are the meters, so the full meter names replace
+  the truncated ones stored on the device, and the relay keeps its own name.
+  - Inputs and sensors keep the device's own names.
+  - `em` is never named from the app, because three-phase readings are one component split
+    by `phase`.
+- **Room.** The room becomes the `area` label.
+
+Renaming a device or moving it to another room in the app changes label values, which
+starts new series. The exporter keeps the last good names through a cloud outage. After a
+restart, discovery waits for the first refresh, so restarting does not rename series
+either.
 
 ## Terminology
 

@@ -32,7 +32,7 @@ type Server struct {
 }
 
 type Discovery struct {
-	// Sources is an ordered list of backends: avahi, zeroconf, static.
+	// Sources is an ordered list of backends: avahi, zeroconf, static, shelly_cloud.
 	Sources      []string `koanf:"sources"`
 	ServiceTypes []string `koanf:"service_types"`
 
@@ -46,8 +46,25 @@ type Discovery struct {
 	// decides the drop policy in relabel_configs rather than the exporter.
 	StaleAfter time.Duration `koanf:"stale_after"`
 
-	Avahi  Avahi         `koanf:"avahi"`
-	Static []StaticEntry `koanf:"static"`
+	Avahi       Avahi                `koanf:"avahi"`
+	Static      []StaticEntry        `koanf:"static"`
+	ShellyCloud DiscoveryShellyCloud `koanf:"shelly_cloud"`
+}
+
+// DiscoveryShellyCloud configures the shelly_cloud discovery backend. The account
+// credentials live under shelly.cloud, because name enrichment uses them too.
+type DiscoveryShellyCloud struct {
+	// Interval is how often the account's device list is re-read. It must stay below
+	// registry.endpoint_ttl, or every cloud-only device loses its address between polls.
+	Interval time.Duration `koanf:"interval"`
+
+	// IncludeOffline also publishes devices the cloud reports as offline. On by default:
+	// the flag describes the device's cloud connection, not its LAN, and Gen1 devices in
+	// particular drop off the cloud for minutes at a time while answering on the LAN
+	// throughout. Skipping them hides working devices; publishing a truly offline one
+	// costs a probe_success 0, which is what an alert wants. A last-reported address that
+	// DHCP has since reassigned is caught by the MAC check before anything is emitted.
+	IncludeOffline bool `koanf:"include_offline"`
 }
 
 type Avahi struct {
@@ -130,6 +147,7 @@ type Backoff struct {
 
 type Shelly struct {
 	Auth                  ShellyAuth    `koanf:"auth"`
+	Cloud                 ShellyCloud   `koanf:"cloud"`
 	DialTimeout           time.Duration `koanf:"dial_timeout"`
 	ResponseHeaderTimeout time.Duration `koanf:"response_header_timeout"`
 	IdentityTTL           time.Duration `koanf:"identity_ttl"`
@@ -143,6 +161,24 @@ type ShellyAuth struct {
 	Password     Secret               `koanf:"password"`
 	PasswordFile string               `koanf:"password_file"`
 	Overrides    []ShellyAuthOverride `koanf:"overrides"`
+}
+
+// ShellyCloud holds the Shelly Cloud account credentials, shared by the shelly_cloud
+// discovery backend and by name enrichment. Either can be used without the other.
+type ShellyCloud struct {
+	// Server is the account's API server, shown next to the key in the Shelly app
+	// (User settings -> Authorization cloud key), e.g. https://shelly-58-eu.shelly.cloud.
+	Server string `koanf:"server"`
+
+	// AuthKey grants control of every device on the account, not just read access.
+	AuthKey     Secret `koanf:"auth_key"`
+	AuthKeyFile string `koanf:"auth_key_file"`
+
+	// Names takes device names, channel names and rooms from the cloud in preference to
+	// the names the devices report about themselves.
+	Names           bool          `koanf:"names"`
+	RefreshInterval time.Duration `koanf:"refresh_interval"`
+	Timeout         time.Duration `koanf:"timeout"`
 }
 
 type ShellyAuthOverride struct {
@@ -234,6 +270,10 @@ func Default() Config {
 				HealthCheckInterval: 30 * time.Second,
 				RebrowseInterval:    30 * time.Minute,
 			},
+			ShellyCloud: DiscoveryShellyCloud{
+				Interval:       5 * time.Minute,
+				IncludeOffline: true,
+			},
 		},
 		Registry: Registry{
 			RefreshInterval:  5 * time.Minute,
@@ -261,7 +301,11 @@ func Default() Config {
 			},
 		},
 		Shelly: Shelly{
-			Auth:                  ShellyAuth{Username: "admin"},
+			Auth: ShellyAuth{Username: "admin"},
+			Cloud: ShellyCloud{
+				RefreshInterval: 15 * time.Minute,
+				Timeout:         30 * time.Second,
+			},
 			DialTimeout:           2 * time.Second,
 			ResponseHeaderTimeout: 5 * time.Second,
 			IdentityTTL:           6 * time.Hour,

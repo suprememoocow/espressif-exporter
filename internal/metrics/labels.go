@@ -30,7 +30,7 @@ var BaseLabels = []string{
 	"name",         // human-facing name; 1:1 with (component, id), so no extra series
 	"device_class", // bounded vocabulary, the most useful filter
 	"phase",        // a|b|c|n|total for three-phase Shelly energy meters, else empty
-	"area",         // ESPHome area, else empty
+	"area",         // ESPHome area, or Shelly Cloud room, else empty
 }
 
 // Labels carries the values for BaseLabels, in order.

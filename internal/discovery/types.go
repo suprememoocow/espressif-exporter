@@ -120,7 +120,13 @@ type Event struct {
 	// entries are named by the operator rather than discovered.
 	DeviceID string
 
-	Instance string // mDNS instance name, or the static entry's id
+	Instance string // mDNS instance name, the static entry's id, or a cloud device id
+
+	// Unnamed marks an Instance that is an opaque identifier rather than a name the device
+	// announces, such as a Shelly Cloud id. The registry uses it as the device's name only
+	// until a source that does announce one observes the device.
+	Unnamed bool
+
 	Domain   string
 	Kind     Kind
 	Endpoint Endpoint

@@ -6,6 +6,7 @@ import (
 	"maps"
 	"net/netip"
 	"slices"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -198,12 +199,19 @@ func (r *Registry) applyAdd(ev discovery.Event, now time.Time) bool {
 				Name:      instanceLabel(ev.Instance),
 				FirstSeen: now,
 			},
-			endpoints: map[discovery.EndpointKey]*endpointState{},
-			sources:   map[string]bool{},
+			endpoints:       map[discovery.EndpointKey]*endpointState{},
+			sources:         map[string]bool{},
+			provisionalName: ev.Unnamed,
 		}
 		r.devices[id] = dev
 		r.log.Info("device discovered",
 			"device", id, "kind", ev.Kind, "name", dev.Name, "source", ev.Source)
+	} else if dev.provisionalName && !ev.Unnamed {
+		if name := instanceLabel(ev.Instance); name != "" {
+			r.log.Info("device renamed", "device", id, "from", dev.Name, "to", name,
+				"source", ev.Source)
+			dev.Name, dev.provisionalName = name, false
+		}
 	}
 
 	r.bindAliases(id, ev)
@@ -261,7 +269,62 @@ func (r *Registry) resolveID(ev discovery.Event) string {
 	if id, ok := r.aliases[derived]; ok {
 		return id
 	}
+	if id := r.matchShortID(ev.Kind, derived); id != "" {
+		return id
+	}
 	return derived
+}
+
+// matchShortID joins a Gen1 Shelly seen under both of its identities. mDNS gives a Gen1
+// device only the last three MAC bytes (shortid:shelly1-b1c2d3), while a source that
+// knows the full MAC, such as Shelly Cloud, gives mac:a8032ab1c2d3. They share no
+// handle, so without this the one device would be published, and scraped, twice.
+//
+// It matches on the three-byte suffix and acts only on a unique candidate: two Shellies
+// whose MACs end alike is unlikely, but guessing between them would attribute one
+// device's readings to the other, so an ambiguous suffix stays unjoined.
+func (r *Registry) matchShortID(kind discovery.Kind, derived string) string {
+	if kind != discovery.KindShelly {
+		return ""
+	}
+	switch {
+	case IsMACID(derived):
+		suffix := "-" + MACOfID(derived)[6:]
+		match := ""
+		for id, dev := range r.devices {
+			if dev.Kind != discovery.KindShelly || !strings.HasPrefix(id, prefixShortID) ||
+				!strings.HasSuffix(id, suffix) {
+				continue
+			}
+			if match != "" {
+				return ""
+			}
+			match = id
+		}
+		if match == "" {
+			return ""
+		}
+		return r.promote(match, derived)
+
+	case strings.HasPrefix(derived, prefixShortID):
+		i := strings.LastIndexByte(derived, '-')
+		if i < 0 {
+			return ""
+		}
+		suffix := derived[i+1:]
+		match := ""
+		for id, dev := range r.devices {
+			if dev.Kind != discovery.KindShelly || !IsMACID(id) || !strings.HasSuffix(id, suffix) {
+				continue
+			}
+			if match != "" {
+				return ""
+			}
+			match = id
+		}
+		return match
+	}
+	return ""
 }
 
 // promote folds a weakly identified device into its strong identity. This is how a Gen1
@@ -298,6 +361,9 @@ func (r *Registry) promote(oldID, newID string) string {
 		}
 		if old.FirstSeen.Before(target.FirstSeen) {
 			target.FirstSeen = old.FirstSeen
+		}
+		if target.provisionalName && !old.provisionalName {
+			target.Name, target.provisionalName = old.Name, false
 		}
 		delete(r.devices, oldID)
 		r.stats.Merges++

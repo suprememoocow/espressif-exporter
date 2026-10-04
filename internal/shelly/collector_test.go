@@ -255,6 +255,32 @@ func TestProbeGen1FallsBackToMDNSNameWhenSettingsIsUnauthorized(t *testing.T) {
 	}
 }
 
+// The registry replaces a provisional name (a bare Shelly Cloud id) once mDNS sees the
+// device. The fallback must follow it while the identity is still cached, not six hours later.
+func TestProbeFallbackNameFollowsTheRegistryWhileIdentityIsCached(t *testing.T) {
+	fake, dev := newFakeDevice(t, gen1ShellyBody, string(fixture(t, "gen1_1pm.json")))
+	fake.configStatus = http.StatusUnauthorized
+	dev.Name = "a8032ab12345"
+
+	c := New(config.Default().Shelly, metrics.NewRegistry(), discardLogger())
+	if _, res := c.Probe(context.Background(), dev); !res.Success {
+		t.Fatalf("probe failed: %+v", res)
+	}
+
+	dev.Name = "shelly1pm-a8032ab12345"
+	out, res := c.Probe(context.Background(), dev)
+	if !res.Success {
+		t.Fatalf("probe failed: %+v", res)
+	}
+	if n := fake.requests["/shelly"]; n != 1 {
+		t.Fatalf("/shelly requested %d times, want 1: the second probe must use the cached identity", n)
+	}
+	if !hasLabel(out, "espressif_device_info", "device_name", dev.Name) {
+		t.Errorf("device_name should follow the registry's current name %q; got %v",
+			dev.Name, labelDump(out, "espressif_device_info"))
+	}
+}
+
 // fetch_config: false means exactly one request per scrape, so the device name is simply not
 // available on Gen1. That is the documented cost of the flag, not a regression.
 func TestProbeGen1WithFetchConfigDisabledKeepsTheMDNSName(t *testing.T) {

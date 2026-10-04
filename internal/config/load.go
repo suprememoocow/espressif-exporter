@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"net/url"
 	"os"
 	"reflect"
 	"strings"
@@ -105,6 +106,10 @@ func (c *Config) resolveSecrets() error {
 			return err
 		}
 	}
+	if c.Shelly.Cloud.AuthKey, err = resolveSecret(
+		"shelly.cloud.auth_key", c.Shelly.Cloud.AuthKey, c.Shelly.Cloud.AuthKeyFile); err != nil {
+		return err
+	}
 	if c.ESPHome.EncryptionKey, err = resolveSecret(
 		"esphome.encryption_key", c.ESPHome.EncryptionKey, c.ESPHome.EncryptionKeyFile); err != nil {
 		return err
@@ -133,14 +138,14 @@ func (c *Config) Validate() error {
 	}
 
 	if len(c.Discovery.Sources) == 0 {
-		add("discovery.sources: at least one of avahi, zeroconf, static is required")
+		add("discovery.sources: at least one of avahi, zeroconf, static, shelly_cloud is required")
 	}
 	seen := map[string]bool{}
 	for _, s := range c.Discovery.Sources {
 		switch s {
-		case "avahi", "zeroconf", "static":
+		case "avahi", "zeroconf", "static", "shelly_cloud":
 		default:
-			add("discovery.sources: unknown source %q (want avahi, zeroconf or static)", s)
+			add("discovery.sources: unknown source %q (want avahi, zeroconf, static or shelly_cloud)", s)
 		}
 		if seen[s] {
 			add("discovery.sources: %q listed more than once", s)
@@ -206,6 +211,34 @@ func (c *Config) Validate() error {
 		add("registry.endpoint_ttl (%s) must exceed discovery.avahi.rebrowse_interval "+
 			"(%s): a rebrowse is the only thing that re-observes an Avahi endpoint",
 			c.Registry.EndpointTTL, c.Discovery.Avahi.RebrowseInterval)
+	}
+
+	// Both cloud features need the account; neither is useful without it, and a missing key
+	// would otherwise surface only as a backend that is quietly never up.
+	if cloud := c.Shelly.Cloud; seen["shelly_cloud"] || cloud.Names {
+		if u, err := url.Parse(cloud.Server); cloud.Server == "" || err != nil ||
+			(u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
+			add("shelly.cloud.server: %q is not a URL such as https://shelly-58-eu.shelly.cloud "+
+				"(required by discovery source shelly_cloud and by shelly.cloud.names)", cloud.Server)
+		}
+		if !cloud.AuthKey.IsSet() {
+			add("shelly.cloud.auth_key: required by discovery source shelly_cloud and by " +
+				"shelly.cloud.names")
+		}
+		if cloud.Names && cloud.RefreshInterval < time.Minute {
+			add("shelly.cloud.refresh_interval (%s) must be at least 1m", cloud.RefreshInterval)
+		}
+	}
+	if seen["shelly_cloud"] {
+		iv := c.Discovery.ShellyCloud.Interval
+		if iv < time.Minute {
+			add("discovery.shelly_cloud.interval (%s) must be at least 1m", iv)
+		}
+		if c.Registry.EndpointTTL <= iv {
+			add("registry.endpoint_ttl (%s) must exceed discovery.shelly_cloud.interval (%s): "+
+				"a poll is the only thing that re-observes a cloud-only endpoint",
+				c.Registry.EndpointTTL, iv)
+		}
 	}
 
 	// A password with no username fails as a 401 at scrape time, which is much harder to
