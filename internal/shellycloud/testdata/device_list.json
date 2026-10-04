@@ -1,0 +1,16 @@
+{
+  "isok": true,
+  "data": {
+    "devices": {
+      "a8032ab12345": {"id": "a8032ab12345", "type": "SNSW-001P16EU", "category": "relay", "gen": 2, "channel": 0, "channels_count": 1, "mode": "relay", "name": "Kitchen Lamp", "room_id": 3, "ip": "192.168.1.57"},
+      "a8032ab1c2d3": {"id": "a8032ab1c2d3", "type": "SHSW-PM", "category": "relay", "gen": 1, "channel": 0, "channels_count": 1, "mode": "relay", "name": "Water Heater Supply", "room_id": "7", "name_sync": true},
+      "485519aabbcc": {"id": "485519aabbcc", "type": "SHSW-25", "category": "relay", "gen": 1, "channel": 0, "channels_count": 2, "mode": "relay", "name": "Landing", "room_id": 3},
+      "485519aabbcc_1": {"id": "485519aabbcc_1", "type": "SHSW-25", "category": "relay", "gen": 1, "channel": 1, "channels_count": 2, "mode": "relay", "name": "Hallway", "room_id": 3},
+      "244cab0a0b0c": {"id": "244cab0a0b0c", "type": "SHEM", "category": "emeter", "gen": 1, "channel": 0, "channels_count": 2, "mode": "emeter", "name": "Kitchen and Dining Room Sockets EM", "room_id": 7},
+      "244cab0a0b0c_1": {"id": "244cab0a0b0c_1", "type": "SHEM", "category": "emeter", "gen": 1, "channel": 1, "channels_count": 2, "mode": "emeter", "name": "Upstairs Hall and Spare Room EM", "room_id": 7},
+      "c45bbe010203": {"id": "c45bbe010203", "type": "SHSW-25", "category": "relay", "gen": 1, "channel": 0, "channels_count": 2, "name": "unnamed", "room_id": -10},
+      "c45bbe010203_1": {"id": "c45bbe010203_1", "type": "SHSW-25", "category": "relay", "gen": 1, "channel": 1, "channels_count": 2, "name": "  Garage Door  ", "room_id": -10},
+      "a1b2c3": {"id": "a1b2c3", "type": "SHRGBW2", "category": "light", "gen": 1, "channel": 0, "channels_count": 1, "mode": "color", "name": "Awning Strip Lights", "room_id": 3}
+    }
+  }
+}

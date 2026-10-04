@@ -99,6 +99,57 @@ func TestPromotesGen1ShortIDToMAC(t *testing.T) {
 	}
 }
 
+// Shelly Cloud knows a Gen1 device by its full MAC while mDNS gives only the last three
+// bytes, so the two observations share no handle. Whichever arrives first, they must end
+// up as one device, or it is published and scraped twice.
+func TestJoinsGen1ShortIDWithCloudMAC(t *testing.T) {
+	mdns := addEvent(discovery.KindShelly, discovery.ServiceHTTP,
+		"shelly1-b1c2d3", "192.168.1.61", 80, nil)
+	cloud := addEvent(discovery.KindShelly, "shelly_cloud",
+		"a8032ab1c2d3", "192.168.1.61", 80, map[string]string{"mac": "a8032ab1c2d3", "gen": "1"})
+
+	for _, order := range []struct {
+		name   string
+		events []discovery.Event
+	}{
+		{"mDNS first", []discovery.Event{mdns, cloud}},
+		{"cloud first", []discovery.Event{cloud, mdns}},
+	} {
+		t.Run(order.name, func(t *testing.T) {
+			r, _ := testRegistry(t)
+			for _, ev := range order.events {
+				r.applyEvent(ev)
+			}
+			r.publish()
+
+			snap := r.Snapshot()
+			if snap.Len() != 1 {
+				t.Fatalf("got %d devices, want 1: %+v", snap.Len(), snap.Devices)
+			}
+			if got := snap.Devices[0].ID; got != "mac:a8032ab1c2d3" {
+				t.Errorf("ID = %q, want mac:a8032ab1c2d3", got)
+			}
+		})
+	}
+}
+
+// Two Gen1 devices whose MACs end alike leave a short ID ambiguous. Guessing would
+// attribute one device's readings to the other, so neither joins.
+func TestAmbiguousShortIDIsNotJoined(t *testing.T) {
+	r, _ := testRegistry(t)
+	r.applyEvent(addEvent(discovery.KindShelly, discovery.ServiceHTTP,
+		"shelly1-b1c2d3", "192.168.1.61", 80, nil))
+	r.applyEvent(addEvent(discovery.KindShelly, discovery.ServiceHTTP,
+		"shellyplug-s-b1c2d3", "192.168.1.62", 80, nil))
+	r.applyEvent(addEvent(discovery.KindShelly, "shelly_cloud",
+		"a8032ab1c2d3", "192.168.1.61", 80, map[string]string{"mac": "a8032ab1c2d3"}))
+	r.publish()
+
+	if n := r.Snapshot().Len(); n != 3 {
+		t.Errorf("got %d devices, want 3 with the ambiguous suffix left unjoined", n)
+	}
+}
+
 // Epoch is what tells collectors to drop a cached digest challenge or API connection.
 func TestEpochBumpsOnAddressChangeOnly(t *testing.T) {
 	r, _ := testRegistry(t)

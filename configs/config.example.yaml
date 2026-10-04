@@ -49,6 +49,16 @@ discovery:
   static:
     - {id: boiler, kind: shelly, address: 192.168.1.51, port: 80}
 
+  # Used only when shelly_cloud is in sources; credentials live under shelly.cloud.
+  shelly_cloud:
+    # Must stay below registry.endpoint_ttl: a poll is the only thing that re-observes a
+    # device known only to the cloud.
+    interval: 5m
+    # "Offline" means offline from the cloud, not the LAN: Gen1 devices drop their cloud
+    # connection for minutes at a time while still answering locally. A reassigned
+    # last-known address is caught by the MAC check.
+    include_offline: true
+
 registry:
   refresh_interval: 5m
   # How long an address survives with nothing confirming it. An mDNS announcement and a
@@ -89,6 +99,18 @@ shelly:
   # not report. Refreshed on the identity_ttl timer, off the scrape path. Set to false to
   # skip the extra request; a Gen1 device_name then falls back to the mDNS hostname.
   fetch_config: true
+
+  # A Shelly Cloud account, for the shelly_cloud discovery source and for names. Copy the
+  # key and server from the Shelly app: User settings -> Authorization cloud key. The key
+  # grants control of every device on the account, so keep it in a file.
+  cloud:
+    server: https://shelly-58-eu.shelly.cloud
+    auth_key_file: /run/secrets/shelly_cloud_key
+    # Take device names, channel names and rooms (as the area label) from the Shelly app,
+    # in preference to the names the devices report about themselves.
+    names: false
+    refresh_interval: 15m
+    timeout: 30s
 
 esphome:
   encryption_key_file: /run/secrets/esphome_psk

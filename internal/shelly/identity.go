@@ -60,6 +60,15 @@ func (c *identityCache) put(deviceID string, id Identity) {
 	c.m[deviceID] = id
 }
 
+// mac returns the MAC last identified for a device, or "". It ignores expiry because its
+// only caller runs mid-probe, after fetchIdentity has just refreshed and verified the
+// entry.
+func (c *identityCache) mac(deviceID string) string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.m[deviceID].MAC
+}
+
 func (c *identityCache) forget(deviceID string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()

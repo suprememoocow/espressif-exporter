@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -21,6 +22,7 @@ import (
 	"github.com/suprememoocow/espressif-exporter/internal/metrics"
 	"github.com/suprememoocow/espressif-exporter/internal/probe"
 	"github.com/suprememoocow/espressif-exporter/internal/registry"
+	"github.com/suprememoocow/espressif-exporter/internal/shellycloud"
 )
 
 var errNoAddress = errors.New("device has no routable address")
@@ -40,6 +42,39 @@ type Collector struct {
 	unknownComponents *unknownCounter
 
 	names *namesCache
+	cloud CloudNames
+}
+
+// CloudNames supplies the names an operator gave a device in the Shelly app, by MAC.
+// Implemented by shellycloud.NameStore.
+type CloudNames interface {
+	Lookup(mac string) (shellycloud.Names, bool)
+	// Loaded is closed once the first refresh has finished.
+	Loaded() <-chan struct{}
+}
+
+// cloudNamesWait bounds how long a probe waits for the first cloud refresh after startup.
+// Without the wait, the first scrapes after every restart would carry the device's own
+// names and then switch to the cloud's, creating a short-lived duplicate of every series.
+// The app also holds discovery back until that refresh, so this is a backstop for a
+// device probed directly by ID.
+const cloudNamesWait = 3 * time.Second
+
+// cloudChannelComponents maps a Shelly Cloud channel category to the component types its
+// name applies to. Channel n names component n of a matching type and nothing else.
+//
+// The category is what makes this safe on devices with mixed components: a Shelly EM or
+// Pro EM-50 has a relay and two meters, and its cloud channels are the meters (category
+// emeter), so they name em1:0 and em1:1 while switch:0 keeps the device's own name.
+// Inputs and sensors have no cloud channel and always keep the device's own names, as
+// does three-phase em, whose phases share one component and so one name. A category not
+// listed here names nothing.
+var cloudChannelComponents = map[string]map[string]bool{
+	"relay":  {"switch": true},
+	"roller": {"cover": true},
+	"cover":  {"cover": true},
+	"light":  {"light": true, "rgb": true, "rgbw": true, "cct": true},
+	"emeter": {"em1": true, "pm1": true},
 }
 
 // New builds the collector.
@@ -57,6 +92,19 @@ func New(cfg config.Shelly, families *metrics.Registry, log *slog.Logger) *Colle
 		unknownComponents: newUnknownCounter(),
 		names:             newNamesCache(cfg.IdentityTTL),
 	}
+}
+
+// SetCloudNames makes names from the Shelly app take precedence over the names devices
+// report about themselves. Call it before the first probe.
+func (c *Collector) SetCloudNames(n CloudNames) { c.cloud = n }
+
+// cloudNames returns a device's names from the Shelly app, if a source is configured and
+// knows the device.
+func (c *Collector) cloudNames(mac string) (shellycloud.Names, bool) {
+	if c.cloud == nil || mac == "" {
+		return shellycloud.Names{}, false
+	}
+	return c.cloud.Lookup(mac)
 }
 
 // Kind implements probe.Prober.
@@ -124,6 +172,25 @@ func (c *Collector) Probe(
 	}
 
 	base := metrics.Labels{Device: dev.ID, Kind: "shelly"}
+
+	// Names from the Shelly app win over the device's own: the app is where people
+	// actually name things, and the on-device copies are often empty or truncated.
+	// The lookup is an in-memory read, so this adds no request to the scrape.
+	if c.cloud != nil {
+		t := time.NewTimer(cloudNamesWait)
+		select {
+		case <-c.cloud.Loaded():
+		case <-t.C:
+		case <-ctx.Done():
+		}
+		t.Stop()
+	}
+	if cloud, ok := c.cloudNames(id.MAC); ok {
+		if cloud.Device != "" {
+			id.Name = cloud.Device
+		}
+		base.Area = cloud.Room
+	}
 	e := metrics.NewEmitter(c.families, base)
 
 	e.Info(metrics.FamilyDeviceInfo,
@@ -195,7 +262,8 @@ func (c *Collector) fetch(
 	return body, resp.StatusCode, nil
 }
 
-// componentName returns a device's configured name for a component, or "".
+// componentName returns a device's configured name for a component, or "". A name from
+// the Shelly app takes precedence over the device's own; see cloudChannelComponents.
 //
 // The energy-only variants emdata/em1data re-emit under em/em1 (see extractEMData), so their
 // names live under the em/em1 config key: normalising here keeps the energy series' name in
@@ -207,7 +275,31 @@ func (c *Collector) componentName(deviceID, component, id string) string {
 	case "em1data":
 		component = "em1"
 	}
+	if name := c.cloudChannelName(deviceID, component, id); name != "" {
+		return name
+	}
 	return c.names.lookup(deviceID, component+":"+id)
+}
+
+// cloudChannelName returns the Shelly app's name for a component, or "" when the app has
+// none for it; see cloudChannelComponents.
+func (c *Collector) cloudChannelName(deviceID, component, id string) string {
+	if c.cloud == nil {
+		return ""
+	}
+	n, err := strconv.Atoi(id)
+	if err != nil {
+		return ""
+	}
+	cloud, ok := c.cloudNames(c.identities.mac(deviceID))
+	if !ok {
+		return ""
+	}
+	ch, ok := cloud.Channel(n)
+	if !ok || !cloudChannelComponents[ch.Category][component] {
+		return ""
+	}
+	return ch.Name
 }
 
 // decodeJSON is a small helper for the Gen1 path, which has a fixed schema.
