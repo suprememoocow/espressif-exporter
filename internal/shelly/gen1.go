@@ -104,10 +104,12 @@ type gen1Status struct {
 
 // decodeGen1Status maps Gen1 readings onto the same families Gen2 uses.
 //
-// The mapping is deliberately not one-to-one with the JSON: relays[i] and meters[i]
-// describe the same physical channel, and Gen2 reports both under switch:N, so Gen1
-// emits them under component="switch" with the same index. That is what makes a Shelly
-// 1PM and a Plus 1PM produce identical label sets, which a test asserts.
+// The mapping is deliberately not one-to-one with the JSON: meters[i] describes the same
+// physical channel as output i, and Gen2 reports an output's power inside the output's own
+// component, so Gen1 emits meters[i] under that output's component with the same index:
+// switch:N on a relay device, light:N on a dimmer or RGBW2. That is what makes a Shelly
+// 1PM and a Plus 1PM produce identical label sets, which a test asserts, and what keeps a
+// dimmer's watts on the same series as its name and on/off state.
 func (c *Collector) decodeGen1Status(e *metrics.Emitter, body []byte) error {
 	var s gen1Status
 	if err := decodeJSON(body, &s); err != nil {
@@ -127,11 +129,19 @@ func (c *Collector) decodeGen1Status(e *metrics.Emitter, body []byte) error {
 		}
 	}
 
+	// output is the component meters[] and the device temperature belong to: the relays if
+	// the device has any, else its lights. A dimmer has no relays, and filing its meter
+	// under switch:0 produced a phantom switch with watts but no state and no name.
+	output := "switch"
+	if len(s.Relays) == 0 && len(s.Lights) > 0 {
+		output = "light"
+	}
+
 	for i, m := range s.Meters {
 		if !m.IsValid {
 			continue // an invalid meter means no reading, not a zero reading
 		}
-		sw := e.WithComponent("switch", strconv.Itoa(i), name("switch", strconv.Itoa(i)))
+		sw := e.WithComponent(output, strconv.Itoa(i), name(output, strconv.Itoa(i)))
 		sw.Value(metrics.FamilyPower, m.Power)
 		// Gen1 meters[] reports WATT-MINUTES, while emeters[] below reports
 		// watt-hours. Mixing them up is a silent 60x error on every Shelly 1PM.
@@ -172,10 +182,10 @@ func (c *Collector) decodeGen1Status(e *metrics.Emitter, body []byte) error {
 		}
 	}
 
-	// The top-level temperature is the device's internal temperature, which Gen2
-	// reports as switch:0.temperature.tC.
+	// The top-level temperature is the device's internal temperature, which Gen2 reports
+	// on its first output: switch:0.temperature.tC, or light:0 on a dimmer.
 	if s.Temperature != nil {
-		sw := e.WithComponent("switch", "0", name("switch", "0"))
+		sw := e.WithComponent(output, "0", name(output, "0"))
 		sw.Value(metrics.FamilyTemperature, *s.Temperature)
 		if s.OverTemperature {
 			sw.Value(metrics.FamilyComponentError, 1, "overtemp")

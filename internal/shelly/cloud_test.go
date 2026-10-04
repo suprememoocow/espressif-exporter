@@ -2,6 +2,7 @@ package shelly
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -206,4 +207,36 @@ func TestCloudEnergyMeterNamesGoToTheMetersNotTheRelay(t *testing.T) {
 		`espressif_energy_joules_total{component=em1,device=mac:244cab0a0b0c,device_class=energy,direction=import,id=0,kind=shelly,name=Kitchen and Dining Room Sockets EM} 3600000`,
 		`espressif_power_watts{component=em1,device=mac:244cab0a0b0c,device_class=power,id=1,kind=shelly,name=Upstairs Hall and Spare Room EM} 50`,
 	)
+}
+
+// A Gen1 dimmer has lights[] and meters[] but no relays. Its watts and temperature belong
+// to light:0, where the cloud name is, not to a phantom switch:0 with no name or state.
+func TestGen1DimmerPowerBelongsToTheLight(t *testing.T) {
+	c, reg := testCollector(t)
+	c.identities.put("mac:c45bbe0a0b0c", Identity{Gen: 1, MAC: "c45bbe0a0b0c"})
+	c.SetCloudNames(newFakeCloudNames(map[string]shellycloud.Names{
+		"c45bbe0a0b0c": {Device: "Kitchen Dimmer", Channels: map[int]shellycloud.Channel{
+			0: {Name: "Kitchen Dimmer", Category: "light"},
+		}},
+	}))
+
+	e := emitterFor(reg, "mac:c45bbe0a0b0c")
+	body := []byte(`{"lights":[{"ison":true,"brightness":40}],
+		"meters":[{"power":12.5,"is_valid":true,"total":600}],"temperature":45.2}`)
+	if err := c.decodeGen1Status(e, body); err != nil {
+		t.Fatal(err)
+	}
+
+	got := series(t, e)
+	want(t, got,
+		`espressif_light_on{component=light,device=mac:c45bbe0a0b0c,id=0,kind=shelly,name=Kitchen Dimmer} 1`,
+		`espressif_power_watts{component=light,device=mac:c45bbe0a0b0c,device_class=power,id=0,kind=shelly,name=Kitchen Dimmer} 12.5`,
+		`espressif_energy_joules_total{component=light,device=mac:c45bbe0a0b0c,device_class=energy,direction=import,id=0,kind=shelly,name=Kitchen Dimmer} 36000`,
+		`espressif_temperature_celsius{component=light,device=mac:c45bbe0a0b0c,device_class=temperature,id=0,kind=shelly,name=Kitchen Dimmer} 45.2`,
+	)
+	for _, line := range got {
+		if strings.Contains(line, "component=switch") {
+			t.Errorf("a dimmer emitted a switch series: %s", line)
+		}
+	}
 }
