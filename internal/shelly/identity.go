@@ -211,10 +211,8 @@ func (c *Collector) fetchIdentity(ctx context.Context, dev registry.Device) (Ide
 		return Identity{}, &macMismatchError{err}
 	}
 
-	// Fall back to the mDNS name when the device has none configured.
-	if id.Name == "" {
-		id.Name = dev.Name
-	}
+	// The mDNS fallback for an empty name is applied per probe, not cached here: the
+	// registry can replace a provisional name after this entry is written.
 	id.fetchedAt = now
 	id.epoch = dev.Epoch
 	c.identities.put(dev.ID, id)

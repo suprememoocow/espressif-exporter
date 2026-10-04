@@ -152,6 +152,9 @@ func (d *Discoverer) poll(ctx context.Context, out chan<- discovery.Event) error
 // mac: identity an mDNS observation of this device derives, so the two merge into one
 // device instead of being scraped twice.
 //
+// It is Unnamed because the cloud id is a bare MAC, not the hostname-style name mDNS
+// gives the device; the registry swaps in the mDNS name once mDNS sees the device.
+//
 // The endpoint is not Trusted: a cloud-reported address is a report, not operator intent,
 // so the allow/deny CIDR and routability checks apply to it as they do to mDNS.
 func event(dev cloudapi.DeviceStatus, now time.Time) discovery.Event {
@@ -176,6 +179,7 @@ func event(dev cloudapi.DeviceStatus, now time.Time) discovery.Event {
 		Type:     discovery.EventAdd,
 		Source:   Name,
 		Instance: dev.ID,
+		Unnamed:  true,
 		Domain:   "local",
 		Kind:     discovery.KindShelly,
 		At:       now,

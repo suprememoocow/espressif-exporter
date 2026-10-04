@@ -199,12 +199,19 @@ func (r *Registry) applyAdd(ev discovery.Event, now time.Time) bool {
 				Name:      instanceLabel(ev.Instance),
 				FirstSeen: now,
 			},
-			endpoints: map[discovery.EndpointKey]*endpointState{},
-			sources:   map[string]bool{},
+			endpoints:       map[discovery.EndpointKey]*endpointState{},
+			sources:         map[string]bool{},
+			provisionalName: ev.Unnamed,
 		}
 		r.devices[id] = dev
 		r.log.Info("device discovered",
 			"device", id, "kind", ev.Kind, "name", dev.Name, "source", ev.Source)
+	} else if dev.provisionalName && !ev.Unnamed {
+		if name := instanceLabel(ev.Instance); name != "" {
+			r.log.Info("device renamed", "device", id, "from", dev.Name, "to", name,
+				"source", ev.Source)
+			dev.Name, dev.provisionalName = name, false
+		}
 	}
 
 	r.bindAliases(id, ev)
@@ -354,6 +361,9 @@ func (r *Registry) promote(oldID, newID string) string {
 		}
 		if old.FirstSeen.Before(target.FirstSeen) {
 			target.FirstSeen = old.FirstSeen
+		}
+		if target.provisionalName && !old.provisionalName {
+			target.Name, target.provisionalName = old.Name, false
 		}
 		delete(r.devices, oldID)
 		r.stats.Merges++

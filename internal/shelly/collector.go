@@ -165,7 +165,7 @@ func (c *Collector) Probe(
 		// cached one: the two caches expire moments apart, so a cached override would be
 		// lost on the next identity refresh and not restored until the names entry expired
 		// too — six more hours of the wrong name. An empty name leaves the mDNS fallback
-		// fetchIdentity already applied, which is also what every Gen2 device takes.
+		// below to apply.
 		if names.device != "" {
 			id.Name = names.device
 		}
@@ -190,6 +190,12 @@ func (c *Collector) Probe(
 			id.Name = cloud.Device
 		}
 		base.Area = cloud.Room
+	}
+	// Fall back to the registry's name when neither the app nor the device has one. It is
+	// read per probe rather than cached with the identity, because the registry replaces
+	// a provisional cloud-id name once mDNS sees the device.
+	if id.Name == "" {
+		id.Name = dev.Name
 	}
 	e := metrics.NewEmitter(c.families, base)
 

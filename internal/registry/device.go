@@ -78,6 +78,10 @@ type deviceState struct {
 	lastDiscovery time.Time
 	lastSuccess   time.Time
 	sources       map[string]bool
+
+	// provisionalName marks a Name taken from an Unnamed event. The first named
+	// observation replaces it, so the name does not depend on which source answered first.
+	provisionalName bool
 }
 
 type endpointState struct {

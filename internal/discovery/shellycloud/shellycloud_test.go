@@ -148,4 +148,7 @@ func TestEventPrefersTheStatusMAC(t *testing.T) {
 	if got := ev.Endpoint.TXT["mac"]; got != "5ccf7fa1b2c3" {
 		t.Errorf("mac TXT = %q, want the status MAC", got)
 	}
+	if !ev.Unnamed {
+		t.Error("Unnamed = false; a cloud id must not outrank the mDNS name")
+	}
 }
