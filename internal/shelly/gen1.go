@@ -182,18 +182,31 @@ func (c *Collector) decodeGen1Status(e *metrics.Emitter, body []byte) error {
 		}
 	}
 
-	// The top-level temperature is the device's internal temperature, which Gen2 reports
-	// on its first output: switch:0.temperature.tC, or light:0 on a dimmer.
-	if s.Temperature != nil {
+	// tmp means different things on different devices. On a device with outputs it is the
+	// internal temperature: a 1PM or 2.5 reports it again as the top-level temperature,
+	// and a dimmer reports it nowhere else. On a battery sensor with no outputs (H&T,
+	// Flood, Door/Window) it is the ambient reading. So it is internal exactly when the
+	// device has outputs, and only the ambient kind becomes temperature:0.
+	hasOutputs := len(s.Relays) > 0 || len(s.Lights) > 0 || len(s.Meters) > 0
+	tmp := s.Tmp != nil && s.Tmp.IsValid && s.Tmp.TC != nil
+
+	// The internal temperature is reported by Gen2 on its first output:
+	// switch:0.temperature.tC, or light:0 on a dimmer. The top-level field wins over tmp
+	// where both exist; they carry the same reading.
+	internal := s.Temperature
+	if internal == nil && tmp && hasOutputs {
+		internal = s.Tmp.TC
+	}
+	if internal != nil {
 		sw := e.WithComponent(output, "0", name(output, "0"))
-		sw.Value(metrics.FamilyTemperature, *s.Temperature)
+		sw.Value(metrics.FamilyTemperature, *internal)
 		if s.OverTemperature {
 			sw.Value(metrics.FamilyComponentError, 1, "overtemp")
 		}
 	}
 
-	// tmp/hum/lux are ambient sensors, matching Gen2's temperature:0 and humidity:0.
-	if s.Tmp != nil && s.Tmp.IsValid && s.Tmp.TC != nil {
+	// tmp/hum/lux on a sensor are ambient, matching Gen2's temperature:0 and humidity:0.
+	if tmp && !hasOutputs {
 		e.WithComponent("temperature", "0", "").Value(metrics.FamilyTemperature, *s.Tmp.TC)
 	}
 	if s.Hum != nil && s.Hum.IsValid && s.Hum.Value != nil {
